@@ -1,0 +1,176 @@
+{
+  "metadata": {
+    "generatedAt": "2026-03-23T14:42:12.215Z",
+    "size": 12
+  },
+  "items": [
+    {
+      "input": "United States / 80161 / Port Veronica / 21877 Isabelle Court / Leah Yundt",
+      "expected": {
+        "name": "Leah Yundt",
+        "street": "21877 Isabelle Court",
+        "city": "Port Veronica",
+        "postal_code": "80161",
+        "country": "United States"
+      },
+      "meta": {
+        "source_country_group": "US",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Brazil - Washington do Norte - 96421-266 - Mariana Braga - 9000 Marginal Lara",
+      "expected": {
+        "name": "Mariana Braga",
+        "street": "9000 Marginal Lara",
+        "city": "Washington do Norte",
+        "postal_code": "96421-266",
+        "country": "Brazil"
+      },
+      "meta": {
+        "source_country_group": "BR",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "25460 / Katjaburg / Kantstr. 9 / Germany / Antonio Holzdeppe",
+      "expected": {
+        "name": "Antonio Holzdeppe",
+        "street": "Kantstr. 9",
+        "city": "Katjaburg",
+        "postal_code": "25460",
+        "country": "Germany"
+      },
+      "meta": {
+        "source_country_group": "EU",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "18056 / Jody Zemlak / United States / Lukasstead / 13615 E Broad St",
+      "expected": {
+        "name": "Jody Zemlak",
+        "street": "13615 E Broad Street",
+        "city": "Lukasstead",
+        "postal_code": "18056",
+        "country": "United States"
+      },
+      "meta": {
+        "source_country_group": "US",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "61732-404 - 44033 Alameda Joana - Brazil - Reis do Descoberto - Benjamin Franco",
+      "expected": {
+        "name": "Benjamin Franco",
+        "street": "44033 Alameda Joana",
+        "city": "Reis do Descoberto",
+        "postal_code": "61732-404",
+        "country": "Brazil"
+      },
+      "meta": {
+        "source_country_group": "BR",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Alanastadt 74075 Luana Petzold Friedenberger Str. 13a Germany",
+      "expected": {
+        "name": "Luana Petzold",
+        "street": "Friedenberger Str. 13a",
+        "city": "Alanastadt",
+        "postal_code": "74075",
+        "country": "Germany"
+      },
+      "meta": {
+        "source_country_group": "EU",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "East Priscilla / United States / 18629 / 42819 Runolfsdottir Cape / Alfredo Jerde",
+      "expected": {
+        "name": "Alfredo Jerde",
+        "street": "42819 Runolfsdottir Cape",
+        "city": "East Priscilla",
+        "postal_code": "18629",
+        "country": "United States"
+      },
+      "meta": {
+        "source_country_group": "US",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "108 R. Moraes - 32270-792 - Margarida do Norte - Ana Luiza Costa - Brazil",
+      "expected": {
+        "name": "Ana Luiza Costa",
+        "street": "108 Rua Moraes",
+        "city": "Margarida do Norte",
+        "postal_code": "32270-792",
+        "country": "Brazil"
+      },
+      "meta": {
+        "source_country_group": "BR",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Jonathan Zekl - Mühlenweg 27c - Germany - 69959 - Bad Kreuznach",
+      "expected": {
+        "name": "Jonathan Zekl",
+        "street": "Mühlenweg 27c",
+        "city": "Bad Kreuznach",
+        "postal_code": "69959",
+        "country": "Germany"
+      },
+      "meta": {
+        "source_country_group": "EU",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Greenholtcester Diane Thiel 74121 1952 Kautzer Square United States",
+      "expected": {
+        "name": "Diane Thiel",
+        "street": "1952 Kautzer Square",
+        "city": "Greenholtcester",
+        "postal_code": "74121",
+        "country": "United States"
+      },
+      "meta": {
+        "source_country_group": "US",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Elísio Carvalho Brazil Carvalho do Sul 33543 Alameda Xavier 90736-732",
+      "expected": {
+        "name": "Elísio Carvalho",
+        "street": "33543 Alameda Xavier",
+        "city": "Carvalho do Sul",
+        "postal_code": "90736-732",
+        "country": "Brazil"
+      },
+      "meta": {
+        "source_country_group": "BR",
+        "is_messy": true
+      }
+    },
+    {
+      "input": "Viktoria Kurrat / 02355 / Germany / Borsigstr. 71a / Neu Ashley",
+      "expected": {
+        "name": "Viktoria Kurrat",
+        "street": "Borsigstr. 71a",
+        "city": "Neu Ashley",
+        "postal_code": "02355",
+        "country": "Germany"
+      },
+      "meta": {
+        "source_country_group": "EU",
+        "is_messy": true
+      }
+    }
+  ]
+}
