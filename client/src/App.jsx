@@ -13,7 +13,13 @@ import './App.css';
 const STAGES = ['Dataset', 'Runner', 'Evaluator', 'Review & Report'];
 const PAGE_SIZE = 12;
 const PREFERRED_MODEL = 'gemma3:4b';
-const EXPECTED_FIELDS = ['name', 'street', 'city', 'postal_code', 'country'];
+const EXPECTED_FIELDS = ['street', 'city', 'state', 'postal_code', 'country'];
+const DATASET_LOCALE_OPTIONS = [
+  { value: 'mixed', label: 'Mixed (US + BR + DE)' },
+  { value: 'en_US', label: 'English (US)' },
+  { value: 'pt_BR', label: 'Portuguese (Brazil)' },
+  { value: 'de_DE', label: 'German (Germany)' },
+];
 
 function formatElapsedTime(ms) {
   const totalSeconds = Math.max(0, Math.round((ms || 0) / 1000));
@@ -54,6 +60,7 @@ function buildEvaluationRows(results = []) {
 function App() {
   const [activeStage, setActiveStage] = useState(0);
   const [size, setSize] = useState(50);
+  const [datasetLocale, setDatasetLocale] = useState('mixed');
   const [dataset, setDataset] = useState([]);
   const [metadata, setMetadata] = useState(null);
   const [history, setHistory] = useState([]);
@@ -142,7 +149,7 @@ function App() {
     setError('');
     setSuccessMessage('');
     try {
-      const response = await generateDataset(Number(size));
+      const response = await generateDataset(Number(size), datasetLocale);
       setDataset(response.items || []);
       setMetadata(response.metadata || null);
       setPage(1);
@@ -354,7 +361,7 @@ function App() {
   function renderStageContent() {
     if (activeStage === 1) {
       const summary = runnerResult?.summary;
-      const topRows = runnerResult?.results?.slice(0, 8) || [];
+      const allRows = runnerResult?.results || [];
       const progressPercent = runnerProgress.total
         ? Math.round((runnerProgress.processed / runnerProgress.total) * 100)
         : 0;
@@ -444,7 +451,7 @@ function App() {
             <p>No execution yet. Click "Run benchmark".</p>
           )}
 
-          {topRows.length > 0 ? (
+          {allRows.length > 0 ? (
             <div className="table-wrapper">
               <table>
                 <thead>
@@ -456,7 +463,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {topRows.map((row, index) => (
+                  {allRows.map((row, index) => (
                     <tr
                       key={`${row.input}-${index}`}
                       className={row.json_valid ? '' : 'row-json-invalid'}
@@ -629,6 +636,19 @@ function App() {
             value={size}
             onChange={(event) => setSize(event.target.value)}
           />
+          <label htmlFor="dataset-locale">Dataset locale</label>
+          <select
+            id="dataset-locale"
+            value={datasetLocale}
+            onChange={(event) => setDatasetLocale(event.target.value)}
+            disabled={loading}
+          >
+            {DATASET_LOCALE_OPTIONS.map((option) => (
+              <option key={option.value} value={option.value}>
+                {option.label}
+              </option>
+            ))}
+          </select>
           <button type="button" onClick={handleGenerate} disabled={loading}>
             {loading ? 'Generating...' : 'Generate dataset'}
           </button>
@@ -649,6 +669,7 @@ function App() {
           <span>Current total: {dataset.length}</span>
           <span>Generated at: {metadata?.generatedAt || '-'}</span>
           <span>Last config size: {metadata?.size || '-'}</span>
+          <span>Locale: {metadata?.locale || '-'}</span>
         </div>
 
         <div className="table-wrapper">
@@ -656,9 +677,9 @@ function App() {
             <thead>
               <tr>
                 <th>Input</th>
-                <th>Name</th>
                 <th>Street</th>
                 <th>City</th>
+                <th>State</th>
                 <th>Postal code</th>
                 <th>Country</th>
               </tr>
@@ -672,9 +693,9 @@ function App() {
                 paginatedRows.map((row, index) => (
                   <tr key={`${row.input}-${index}`}>
                     <td>{row.input}</td>
-                    <td>{row.expected?.name}</td>
                     <td>{row.expected?.street}</td>
                     <td>{row.expected?.city}</td>
+                    <td>{row.expected?.state}</td>
                     <td>{row.expected?.postal_code}</td>
                     <td>{row.expected?.country}</td>
                   </tr>

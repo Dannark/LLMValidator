@@ -1,20 +1,21 @@
 const express = require('express');
 const {
-  generateAndSaveDataset,
+  generateAndSaveDatasetWithLocale,
   getLatestDataset,
   getDatasetHistory,
   getDatasetByFileName,
   deleteDatasetFileByFileName,
   MIN_DATASET_SIZE,
   MAX_DATASET_SIZE,
+  SUPPORTED_LOCALES,
 } = require('../services/datasetService');
 
 const router = express.Router();
 
 router.post('/generate', async (req, res) => {
   try {
-    const { size } = req.body;
-    const response = await generateAndSaveDataset(size);
+    const { size, locale = 'mixed' } = req.body;
+    const response = await generateAndSaveDatasetWithLocale(size, locale);
 
     res.status(201).json({
       ok: true,
@@ -28,6 +29,7 @@ router.post('/generate', async (req, res) => {
         min: MIN_DATASET_SIZE,
         max: MAX_DATASET_SIZE,
       },
+      supported_locales: SUPPORTED_LOCALES,
     });
   }
 });

@@ -6,10 +6,10 @@ function buildPrompt(inputText) {
     'You are a strict JSON extractor.',
     'Extract the address fields from the input text and return ONLY valid JSON.',
     'Do not include markdown, explanations, or extra keys.',
-    'Required keys: name, street, city, postal_code, country.',
+    'Required keys: street, city, state, postal_code, country.',
     'Use empty string when a field is unknown.',
     'Output format:',
-    '{"name":"","street":"","city":"","postal_code":"","country":""}',
+    '{"street":"","city":"","state":"","postal_code":"","country":""}',
     '',
     `Input: ${inputText}`,
   ].join('\n');

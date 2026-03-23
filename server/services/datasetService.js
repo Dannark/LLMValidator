@@ -1,5 +1,8 @@
 const path = require('path');
-const { buildDataset } = require(path.join(__dirname, '..', '..', 'dataset', 'generateDataset'));
+const {
+  buildDataset,
+  SUPPORTED_LOCALES,
+} = require(path.join(__dirname, '..', '..', 'dataset', 'generateDataset'));
 const {
   saveDataset,
   readLatestDataset,
@@ -31,6 +34,32 @@ async function generateAndSaveDataset(size) {
   const metadata = {
     generatedAt: new Date().toISOString(),
     size,
+    locale: 'mixed',
+  };
+
+  const { filePath, latestFilePath } = await saveDataset(items, metadata);
+  return {
+    metadata,
+    filePath,
+    latestFilePath,
+    items,
+  };
+}
+
+function validateLocale(locale) {
+  if (!SUPPORTED_LOCALES.includes(locale)) {
+    throw new Error(`locale must be one of: ${SUPPORTED_LOCALES.join(', ')}`);
+  }
+}
+
+async function generateAndSaveDatasetWithLocale(size, locale = 'mixed') {
+  validateDatasetSize(size);
+  validateLocale(locale);
+  const items = buildDataset(size, locale);
+  const metadata = {
+    generatedAt: new Date().toISOString(),
+    size,
+    locale,
   };
 
   const { filePath, latestFilePath } = await saveDataset(items, metadata);
@@ -90,4 +119,6 @@ module.exports = {
   getDatasetHistory,
   getDatasetByFileName,
   deleteDatasetFileByFileName,
+  generateAndSaveDatasetWithLocale,
+  SUPPORTED_LOCALES,
 };

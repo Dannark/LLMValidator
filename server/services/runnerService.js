@@ -6,9 +6,9 @@ function sanitizeOutput(parsedJson) {
   }
 
   return {
-    name: `${parsedJson.name ?? ''}`.trim(),
     street: `${parsedJson.street ?? ''}`.trim(),
     city: `${parsedJson.city ?? ''}`.trim(),
+    state: `${parsedJson.state ?? ''}`.trim(),
     postal_code: `${parsedJson.postal_code ?? ''}`.trim(),
     country: `${parsedJson.country ?? ''}`.trim(),
   };

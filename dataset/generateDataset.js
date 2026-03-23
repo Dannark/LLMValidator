@@ -4,52 +4,67 @@ const { faker, fakerPT_BR, fakerEN_US, fakerDE } = require('@faker-js/faker');
 
 const DEFAULT_TOTAL_ENTRIES = 60;
 const OUTPUT_FILE = path.join(__dirname, 'addresses.dataset.json');
+const SUPPORTED_LOCALES = ['mixed', 'en_US', 'pt_BR', 'de_DE'];
 
 const COUNTRY_CONFIGS = [
   {
     label: 'US',
+    localeCode: 'en_US',
     fakerInstance: fakerEN_US,
     countryName: 'United States',
     postalCode: () => fakerEN_US.location.zipCode('#####'),
-    rawFormatter: ({ name, street, city, postalCode, country }) =>
-      `${name}, ${street}, ${city}, ${postalCode}, ${country}`,
+    state: () => fakerEN_US.location.state(),
+    rawFormatter: ({ street, city, state, postalCode, country }) =>
+      `${street}, ${city}, ${state}, ${postalCode}, ${country}`,
   },
   {
     label: 'BR',
+    localeCode: 'pt_BR',
     fakerInstance: fakerPT_BR,
     countryName: 'Brazil',
     postalCode: () => fakerPT_BR.location.zipCode('#####-###'),
-    rawFormatter: ({ name, street, city, postalCode, country }) =>
-      `${name}, ${street}, ${city} - ${postalCode}, ${country}`,
+    state: () => fakerPT_BR.location.state({ abbreviated: true }),
+    rawFormatter: ({ street, city, state, postalCode, country }) =>
+      `${street}, ${city} - ${state}, ${postalCode}, ${country}`,
   },
   {
     label: 'EU',
+    localeCode: 'de_DE',
     fakerInstance: fakerDE,
     countryName: 'Germany',
     postalCode: () => fakerDE.location.zipCode('#####'),
-    rawFormatter: ({ name, street, city, postalCode, country }) =>
-      `${name}, ${street}, ${postalCode} ${city}, ${country}`,
+    state: () => fakerDE.location.state(),
+    rawFormatter: ({ street, city, state, postalCode, country }) =>
+      `${street}, ${postalCode} ${city}, ${state}, ${country}`,
   },
 ];
 
-function pickCountryConfig(index) {
-  return COUNTRY_CONFIGS[index % COUNTRY_CONFIGS.length];
+function pickCountryConfig(index, locale = 'mixed') {
+  if (locale === 'mixed') {
+    return COUNTRY_CONFIGS[index % COUNTRY_CONFIGS.length];
+  }
+
+  const filtered = COUNTRY_CONFIGS.filter((config) => config.localeCode === locale);
+  if (filtered.length === 0) {
+    throw new Error(`Locale inválido: ${locale}`);
+  }
+  return filtered[index % filtered.length];
 }
 
 function generateCleanAddress(config) {
   const f = config.fakerInstance;
   const expected = {
-    name: f.person.fullName(),
     street: f.location.streetAddress(),
     city: f.location.city(),
+    state: config.state(),
     postal_code: config.postalCode(),
     country: config.countryName,
   };
 
   const input = config.rawFormatter({
-    name: expected.name,
     street: expected.street,
     city: expected.city,
+    state: expected.state,
     postalCode: expected.postal_code,
     country: expected.country,
   });
@@ -78,9 +93,9 @@ function abbreviateStreet(street) {
 
 function generateMessyAddress(entry) {
   const tokens = [
-    entry.expected.name,
     abbreviateStreet(entry.expected.street),
     entry.expected.city,
+    entry.expected.state,
     entry.expected.postal_code,
     entry.expected.country,
   ];
@@ -96,11 +111,15 @@ function generateMessyAddress(entry) {
     .trim();
 }
 
-function buildDataset(totalEntries = DEFAULT_TOTAL_ENTRIES) {
+function buildDataset(totalEntries = DEFAULT_TOTAL_ENTRIES, locale = 'mixed') {
+  if (!SUPPORTED_LOCALES.includes(locale)) {
+    throw new Error(`Locale não suportado. Opções: ${SUPPORTED_LOCALES.join(', ')}`);
+  }
+
   const dataset = [];
 
   for (let i = 0; i < totalEntries; i += 1) {
-    const countryConfig = pickCountryConfig(i);
+    const countryConfig = pickCountryConfig(i, locale);
     const cleanEntry = generateCleanAddress(countryConfig);
     const messyInput = generateMessyAddress(cleanEntry);
 
@@ -109,6 +128,7 @@ function buildDataset(totalEntries = DEFAULT_TOTAL_ENTRIES) {
       expected: cleanEntry.expected,
       meta: {
         source_country_group: countryConfig.label,
+        locale: countryConfig.localeCode,
         is_messy: true,
       },
     });
@@ -125,7 +145,7 @@ async function saveDataset(dataset, outputFile = OUTPUT_FILE) {
 
 async function main() {
   try {
-    const dataset = buildDataset(DEFAULT_TOTAL_ENTRIES);
+    const dataset = buildDataset(DEFAULT_TOTAL_ENTRIES, 'mixed');
     const outputFile = await saveDataset(dataset);
     console.log(`Dataset gerado com ${dataset.length} entradas em: ${outputFile}`);
   } catch (error) {
@@ -139,6 +159,7 @@ if (require.main === module) {
 }
 
 module.exports = {
+  SUPPORTED_LOCALES,
   buildDataset,
   generateMessyAddress,
   generateCleanAddress,

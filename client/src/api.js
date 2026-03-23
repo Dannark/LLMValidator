@@ -20,11 +20,11 @@ async function parseResponse(response) {
   return payload;
 }
 
-export async function generateDataset(size) {
+export async function generateDataset(size, locale = 'mixed') {
   const response = await fetch(`${API_BASE_URL}/dataset/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ size }),
+    body: JSON.stringify({ size, locale }),
   });
   return parseResponse(response);
 }
