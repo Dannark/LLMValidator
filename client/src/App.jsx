@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   deleteDatasetByFileName,
   generateDataset,
@@ -6,12 +6,50 @@ import {
   getDatasetHistory,
   getLatestDataset,
   getInstalledModels,
-  runModelBenchmark,
+  runSingleExtraction,
 } from './api';
 import './App.css';
 
 const STAGES = ['Dataset', 'Runner', 'Evaluator', 'Review & Report'];
 const PAGE_SIZE = 12;
+const PREFERRED_MODEL = 'gemma3:4b';
+const EXPECTED_FIELDS = ['name', 'street', 'city', 'postal_code', 'country'];
+
+function formatElapsedTime(ms) {
+  const totalSeconds = Math.max(0, Math.round((ms || 0) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}m ${seconds}s`;
+}
+
+function normalizeValue(value) {
+  return `${value ?? ''}`.trim().toLowerCase();
+}
+
+function isExactRowMatch(expected, parsed) {
+  if (!expected || !parsed) {
+    return false;
+  }
+  return EXPECTED_FIELDS.every((field) => normalizeValue(expected[field]) === normalizeValue(parsed[field]));
+}
+
+function buildEvaluationRows(results = []) {
+  return results.map((row, index) => {
+    const exactMatch = row.json_valid && isExactRowMatch(row.expected, row.parsed_json);
+    return {
+      id: `${index}-${row.input}`,
+      index: index + 1,
+      input: row.input,
+      expected: row.expected || {},
+      parsed_json: row.parsed_json,
+      raw_output: row.raw_output,
+      json_valid: row.json_valid,
+      auto_exact_match: exactMatch,
+      needs_manual_review: row.json_valid && !exactMatch,
+      manual_decision: null,
+    };
+  });
+}
 
 function App() {
   const [activeStage, setActiveStage] = useState(0);
@@ -27,9 +65,18 @@ function App() {
   const [modelsLoading, setModelsLoading] = useState(false);
   const [runnerLimit, setRunnerLimit] = useState(20);
   const [runnerLoading, setRunnerLoading] = useState(false);
+  const [runnerCancelRequested, setRunnerCancelRequested] = useState(false);
   const [runnerResult, setRunnerResult] = useState(null);
+  const [evaluationRows, setEvaluationRows] = useState([]);
+  const [evaluationIndex, setEvaluationIndex] = useState(0);
+  const [runnerProgress, setRunnerProgress] = useState({
+    processed: 0,
+    total: 0,
+    current: '',
+  });
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const runnerCancelRef = useRef(false);
 
   useEffect(() => {
     async function bootstrap() {
@@ -54,6 +101,12 @@ function App() {
   }, []);
 
   useEffect(() => {
+    const results = runnerResult?.results || [];
+    setEvaluationRows(buildEvaluationRows(results));
+    setEvaluationIndex(0);
+  }, [runnerResult]);
+
+  useEffect(() => {
     async function loadModels() {
       setModelsLoading(true);
       try {
@@ -61,7 +114,12 @@ function App() {
         const models = response.models || [];
         setAvailableModels(models);
         if (models.length > 0) {
-          setRunnerModel((current) => (models.includes(current) ? current : models[0]));
+          setRunnerModel((current) => {
+            if (models.includes(PREFERRED_MODEL)) {
+              return PREFERRED_MODEL;
+            }
+            return models.includes(current) ? current : models[0];
+          });
         }
       } catch {
         // Se falhar, mantém campo atual para permitir valor manual futuro.
@@ -90,9 +148,9 @@ function App() {
       setPage(1);
       const historyResponse = await getDatasetHistory();
       setHistory(historyResponse.items || []);
-      setSuccessMessage('Dataset gerado com sucesso.');
+      setSuccessMessage('Dataset generated successfully.');
     } catch (err) {
-      setError(err.message || 'Erro ao gerar dataset.');
+      setError(err.message || 'Failed to generate dataset.');
     } finally {
       setLoading(false);
     }
@@ -108,9 +166,9 @@ function App() {
       setDataset(response.items || []);
       setMetadata(response.metadata || null);
       setPage(1);
-      setSuccessMessage(`Dataset ${fileName} carregado com sucesso.`);
+      setSuccessMessage(`Dataset ${fileName} loaded successfully.`);
     } catch (err) {
-      setError(err.message || 'Falha ao carregar dataset.');
+      setError(err.message || 'Failed to load dataset.');
     } finally {
       setHistoryActionLoading((current) => {
         const next = { ...current };
@@ -122,7 +180,7 @@ function App() {
 
   async function handleDeleteHistoryDataset(fileName) {
     const shouldDelete = window.confirm(
-      `Tem certeza que deseja excluir permanentemente ${fileName}?`,
+      `Are you sure you want to permanently delete ${fileName}?`,
     );
     if (!shouldDelete) {
       return;
@@ -152,9 +210,9 @@ function App() {
       }
 
       setPage(1);
-      setSuccessMessage(`Dataset ${fileName} excluído com sucesso.`);
+      setSuccessMessage(`Dataset ${fileName} deleted successfully.`);
     } catch (err) {
-      setError(err.message || 'Falha ao excluir dataset.');
+      setError(err.message || 'Failed to delete dataset.');
     } finally {
       setHistoryActionLoading((current) => {
         const next = { ...current };
@@ -166,6 +224,8 @@ function App() {
 
   async function handleRunBenchmark() {
     setRunnerLoading(true);
+    setRunnerCancelRequested(false);
+    runnerCancelRef.current = false;
     setError('');
     setSuccessMessage('');
     setRunnerResult(null);
@@ -173,17 +233,103 @@ function App() {
     try {
       const limitedCases = dataset.slice(0, Number(runnerLimit));
       if (limitedCases.length === 0) {
-        throw new Error('Carregue ou gere um dataset antes de executar o runner.');
+        throw new Error('Load or generate a dataset before running the benchmark.');
       }
 
-      const response = await runModelBenchmark(runnerModel, limitedCases);
-      setRunnerResult(response);
-      setSuccessMessage(`Runner concluído para ${runnerModel}.`);
+      const startedAt = Date.now();
+      const results = [];
+      setRunnerProgress({
+        processed: 0,
+        total: limitedCases.length,
+        current: 'Starting execution...',
+      });
+
+      for (let index = 0; index < limitedCases.length; index += 1) {
+        if (runnerCancelRef.current) {
+          break;
+        }
+
+        const item = limitedCases[index];
+        const step = `${index + 1}/${limitedCases.length}`;
+        setRunnerProgress({
+          processed: index,
+          total: limitedCases.length,
+          current: `Running prompt ${step}`,
+        });
+
+        try {
+          const response = await runSingleExtraction(runnerModel, item.input);
+          results.push({
+            input: item.input,
+            expected: item.expected ?? null,
+            raw_output: response.raw_output,
+            parsed_json: response.parsed_json,
+            execution_time_ms: response.execution_time_ms,
+            json_valid: response.json_valid,
+            error: null,
+          });
+        } catch (err) {
+          results.push({
+            input: item.input,
+            expected: item.expected ?? null,
+            raw_output: '',
+            parsed_json: null,
+            execution_time_ms: 0,
+            json_valid: false,
+            error: err.message || 'Execution failed.',
+          });
+        }
+      }
+
+      const processed = results.length;
+      const validCount = results.filter((item) => item.json_valid).length;
+      const avgLatencyMs = processed
+        ? Math.round(
+            results.reduce((acc, item) => acc + (item.execution_time_ms || 0), 0) / processed,
+          )
+        : 0;
+      const totalElapsedMs = Date.now() - startedAt;
+
+      setRunnerProgress({
+        processed,
+        total: limitedCases.length,
+        current: runnerCancelRef.current ? 'Execution canceled by user.' : 'Execution completed.',
+      });
+      setRunnerResult({
+        model: runnerModel,
+        summary: {
+          processed,
+          json_valid_count: validCount,
+          json_valid_rate: processed ? validCount / processed : 0,
+          avg_latency_ms: avgLatencyMs,
+          total_elapsed_ms: totalElapsedMs,
+        },
+        results,
+      });
+      if (runnerCancelRef.current) {
+        setSuccessMessage(`Runner canceled for ${runnerModel}. Partial results are shown.`);
+      } else {
+        setSuccessMessage(`Runner completed for ${runnerModel}.`);
+      }
     } catch (err) {
-      setError(err.message || 'Falha ao executar runner.');
+      setError(err.message || 'Failed to run benchmark.');
     } finally {
       setRunnerLoading(false);
+      setRunnerCancelRequested(false);
+      runnerCancelRef.current = false;
     }
+  }
+
+  function handleCancelRun() {
+    if (!runnerLoading) {
+      return;
+    }
+    runnerCancelRef.current = true;
+    setRunnerCancelRequested(true);
+    setRunnerProgress((current) => ({
+      ...current,
+      current: 'Cancel requested. Finishing current request...',
+    }));
   }
 
   async function handleRefreshModels() {
@@ -195,11 +341,11 @@ function App() {
       const models = response.models || [];
       setAvailableModels(models);
       if (models.length > 0) {
-        setRunnerModel(models[0]);
+        setRunnerModel(models.includes(PREFERRED_MODEL) ? PREFERRED_MODEL : models[0]);
       }
-      setSuccessMessage('Modelos atualizados com sucesso.');
+      setSuccessMessage('Models refreshed successfully.');
     } catch (err) {
-      setError(err.message || 'Falha ao carregar modelos do Ollama.');
+      setError(err.message || 'Failed to load Ollama models.');
     } finally {
       setModelsLoading(false);
     }
@@ -209,11 +355,14 @@ function App() {
     if (activeStage === 1) {
       const summary = runnerResult?.summary;
       const topRows = runnerResult?.results?.slice(0, 8) || [];
+      const progressPercent = runnerProgress.total
+        ? Math.round((runnerProgress.processed / runnerProgress.total) * 100)
+        : 0;
       return (
         <section className="dataset-card">
           <h2>Runner Ollama</h2>
           <div className="controls-row">
-            <label htmlFor="runner-model">Modelo</label>
+            <label htmlFor="runner-model">Model</label>
             <select
               id="runner-model"
               value={runnerModel}
@@ -221,7 +370,7 @@ function App() {
               disabled={modelsLoading || availableModels.length === 0}
             >
               {availableModels.length === 0 ? (
-                <option value="">Nenhum modelo encontrado</option>
+                <option value="">No models found</option>
               ) : (
                 availableModels.map((modelName) => (
                   <option key={modelName} value={modelName}>
@@ -236,9 +385,9 @@ function App() {
               onClick={handleRefreshModels}
               disabled={modelsLoading}
             >
-              {modelsLoading ? 'Atualizando...' : 'Atualizar modelos'}
+              {modelsLoading ? 'Refreshing...' : 'Refresh models'}
             </button>
-            <label htmlFor="runner-limit">Qtd de casos</label>
+            <label htmlFor="runner-limit">Cases count</label>
             <input
               id="runner-limit"
               type="number"
@@ -248,29 +397,51 @@ function App() {
               onChange={(event) => setRunnerLimit(event.target.value)}
             />
             <button type="button" onClick={handleRunBenchmark} disabled={runnerLoading}>
-              {runnerLoading ? 'Executando...' : 'Executar benchmark'}
+              {runnerLoading ? 'Running...' : 'Run benchmark'}
             </button>
+            {runnerLoading ? (
+              <button
+                type="button"
+                className="danger"
+                onClick={handleCancelRun}
+                disabled={runnerCancelRequested}
+              >
+                {runnerCancelRequested ? 'Cancelling...' : 'Cancel run'}
+              </button>
+            ) : null}
           </div>
 
           {error ? <p className="error-message">{error}</p> : null}
           {successMessage ? <p className="success-message">{successMessage}</p> : null}
 
           <div className="meta-row">
-            <span>Dataset carregado: {dataset.length} itens</span>
-            <span>Modelo selecionado: {runnerModel}</span>
-            <span>Limite atual: {runnerLimit}</span>
+            <span>Loaded dataset: {dataset.length} items</span>
+            <span>Selected model: {runnerModel}</span>
+            <span>Current limit: {runnerLimit}</span>
           </div>
+
+          {runnerLoading ? (
+            <div className="runner-summary">
+              <strong>Progress</strong>
+              <p>
+                {runnerProgress.processed}/{runnerProgress.total} ({progressPercent}%)
+              </p>
+              <p>{runnerProgress.current || 'Waiting for execution...'}</p>
+              <progress value={runnerProgress.processed} max={Math.max(1, runnerProgress.total)} />
+            </div>
+          ) : null}
 
           {summary ? (
             <div className="runner-summary">
-              <strong>Resumo</strong>
-              <p>Processados: {summary.processed}</p>
-              <p>JSON válido: {summary.json_valid_count}</p>
-              <p>Taxa JSON válido: {(summary.json_valid_rate * 100).toFixed(2)}%</p>
-              <p>Latência média: {summary.avg_latency_ms} ms</p>
+              <strong>Summary</strong>
+              <p>Processed: {summary.processed}</p>
+              <p>Valid JSON: {summary.json_valid_count}</p>
+              <p>Valid JSON rate: {(summary.json_valid_rate * 100).toFixed(2)}%</p>
+              <p>Average latency: {summary.avg_latency_ms} ms</p>
+              <p>Total elapsed time: {formatElapsedTime(summary.total_elapsed_ms)}</p>
             </div>
           ) : (
-            <p>Nenhuma execução ainda. Clique em "Executar benchmark".</p>
+            <p>No execution yet. Click "Run benchmark".</p>
           )}
 
           {topRows.length > 0 ? (
@@ -279,16 +450,19 @@ function App() {
                 <thead>
                   <tr>
                     <th>Input</th>
-                    <th>JSON válido</th>
-                    <th>Latência (ms)</th>
-                    <th>Output bruto</th>
+                    <th>Valid JSON</th>
+                    <th>Latency (ms)</th>
+                    <th>Raw output</th>
                   </tr>
                 </thead>
                 <tbody>
                   {topRows.map((row, index) => (
-                    <tr key={`${row.input}-${index}`}>
+                    <tr
+                      key={`${row.input}-${index}`}
+                      className={row.json_valid ? '' : 'row-json-invalid'}
+                    >
                       <td>{row.input}</td>
-                      <td>{row.json_valid ? 'Sim' : 'Não'}</td>
+                      <td>{row.json_valid ? 'Yes' : 'No'}</td>
                       <td>{row.execution_time_ms}</td>
                       <td>{row.raw_output || row.error || '-'}</td>
                     </tr>
@@ -301,20 +475,152 @@ function App() {
       );
     }
 
+    if (activeStage === 2) {
+      const currentRow = evaluationRows[evaluationIndex] || null;
+      const totalRows = evaluationRows.length;
+      const autoApprovedCount = evaluationRows.filter((row) => row.auto_exact_match).length;
+      const failedCount = evaluationRows.filter((row) => !row.json_valid).length;
+      const pendingReviewCount = evaluationRows.filter(
+        (row) => row.needs_manual_review && row.manual_decision === null,
+      ).length;
+      const manualApprovedCount = evaluationRows.filter((row) => row.manual_decision === true).length;
+      const finalApprovedCount = autoApprovedCount + manualApprovedCount;
+      const finalRejectedCount = totalRows - finalApprovedCount;
+      const finalApprovalRate = totalRows ? ((finalApprovedCount / totalRows) * 100).toFixed(2) : '0.00';
+
+      function setManualDecision(decision) {
+        if (!currentRow) {
+          return;
+        }
+        setEvaluationRows((rows) =>
+          rows.map((row) => (row.id === currentRow.id ? { ...row, manual_decision: decision } : row)),
+        );
+      }
+
+      return (
+        <section className="dataset-card">
+          <h2>Evaluator</h2>
+          <div className="meta-row">
+            <span>Total rows: {totalRows}</span>
+            <span>Auto approved: {autoApprovedCount}</span>
+            <span>Failed (invalid JSON): {failedCount}</span>
+            <span>Pending manual review: {pendingReviewCount}</span>
+          </div>
+
+          <div className="runner-summary">
+            <strong>Final metrics (auto + manual)</strong>
+            <p>Approved rows: {finalApprovedCount}</p>
+            <p>Rejected rows: {finalRejectedCount}</p>
+            <p>Approval rate: {finalApprovalRate}%</p>
+          </div>
+
+          {currentRow ? (
+            <>
+              <div className="meta-row">
+                <span>
+                  Reviewing row {evaluationIndex + 1} of {totalRows}
+                </span>
+                <span>JSON valid: {currentRow.json_valid ? 'Yes' : 'No'}</span>
+                <span>
+                  Auto exact match: {currentRow.auto_exact_match ? 'Yes (approved)' : 'No'}
+                </span>
+              </div>
+
+              <div className="runner-summary">
+                <strong>Input</strong>
+                <p>{currentRow.input}</p>
+              </div>
+
+              <div className="table-wrapper">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Field</th>
+                      <th>Expected</th>
+                      <th>Model output</th>
+                      <th>Match</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {EXPECTED_FIELDS.map((field) => {
+                      const expectedValue = currentRow.expected?.[field] ?? '';
+                      const outputValue = currentRow.parsed_json?.[field] ?? '';
+                      const match = normalizeValue(expectedValue) === normalizeValue(outputValue);
+                      return (
+                        <tr key={field} className={match ? '' : 'row-json-invalid'}>
+                          <td>{field}</td>
+                          <td>{expectedValue || '-'}</td>
+                          <td>{outputValue || '-'}</td>
+                          <td>{match ? 'Yes' : 'No'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              {!currentRow.auto_exact_match && currentRow.json_valid ? (
+                <div className="controls-row" style={{ marginTop: '12px' }}>
+                  <span>This row needs manual decision:</span>
+                  <button
+                    type="button"
+                    onClick={() => setManualDecision(true)}
+                    className={currentRow.manual_decision === true ? '' : 'secondary'}
+                  >
+                    Mark row as correct
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setManualDecision(false)}
+                    className={currentRow.manual_decision === false ? 'danger' : 'secondary'}
+                  >
+                    Mark row as incorrect
+                  </button>
+                </div>
+              ) : null}
+
+              <div className="pagination-row">
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() => setEvaluationIndex((current) => Math.max(0, current - 1))}
+                  disabled={evaluationIndex === 0}
+                >
+                  Previous row
+                </button>
+                <button
+                  type="button"
+                  className="secondary"
+                  onClick={() =>
+                    setEvaluationIndex((current) => Math.min(totalRows - 1, current + 1))
+                  }
+                  disabled={evaluationIndex >= totalRows - 1}
+                >
+                  Next row
+                </button>
+              </div>
+            </>
+          ) : (
+            <p>Run a benchmark first to start evaluation.</p>
+          )}
+        </section>
+      );
+    }
+
     if (activeStage !== 0) {
       return (
         <section className="placeholder-card">
-          <h2>Etapa em preparação</h2>
-          <p>Esta tela será habilitada quando implementarmos o {STAGES[activeStage]}.</p>
+          <h2>Stage in progress</h2>
+          <p>This screen will be enabled when we implement {STAGES[activeStage]}.</p>
         </section>
       );
     }
 
     return (
       <section className="dataset-card">
-        <h2>Gerador de Dataset</h2>
+        <h2>Dataset Generator</h2>
         <div className="controls-row">
-          <label htmlFor="dataset-size">Quantidade de endereços</label>
+          <label htmlFor="dataset-size">Number of addresses</label>
           <input
             id="dataset-size"
             type="number"
@@ -324,7 +630,7 @@ function App() {
             onChange={(event) => setSize(event.target.value)}
           />
           <button type="button" onClick={handleGenerate} disabled={loading}>
-            {loading ? 'Gerando...' : 'Gerar dataset'}
+            {loading ? 'Generating...' : 'Generate dataset'}
           </button>
           <button
             type="button"
@@ -332,7 +638,7 @@ function App() {
             onClick={() => setActiveStage(1)}
             disabled={dataset.length === 0}
           >
-            Continuar para próxima etapa
+            Continue to next stage
           </button>
         </div>
 
@@ -340,9 +646,9 @@ function App() {
         {successMessage ? <p className="success-message">{successMessage}</p> : null}
 
         <div className="meta-row">
-          <span>Total atual: {dataset.length}</span>
-          <span>Gerado em: {metadata?.generatedAt || '-'}</span>
-          <span>Última configuração: {metadata?.size || '-'}</span>
+          <span>Current total: {dataset.length}</span>
+          <span>Generated at: {metadata?.generatedAt || '-'}</span>
+          <span>Last config size: {metadata?.size || '-'}</span>
         </div>
 
         <div className="table-wrapper">
@@ -350,17 +656,17 @@ function App() {
             <thead>
               <tr>
                 <th>Input</th>
-                <th>Nome</th>
-                <th>Rua</th>
-                <th>Cidade</th>
-                <th>CEP</th>
-                <th>País</th>
+                <th>Name</th>
+                <th>Street</th>
+                <th>City</th>
+                <th>Postal code</th>
+                <th>Country</th>
               </tr>
             </thead>
             <tbody>
               {paginatedRows.length === 0 ? (
                 <tr>
-                  <td colSpan="6">Nenhum dataset disponível ainda.</td>
+                  <td colSpan="6">No dataset available yet.</td>
                 </tr>
               ) : (
                 paginatedRows.map((row, index) => (
@@ -385,10 +691,10 @@ function App() {
             onClick={() => setPage((current) => Math.max(1, current - 1))}
             disabled={page === 1}
           >
-            Anterior
+            Previous
           </button>
           <span>
-            Página {page} de {totalPages}
+            Page {page} of {totalPages}
           </span>
           <button
             type="button"
@@ -396,14 +702,14 @@ function App() {
             onClick={() => setPage((current) => Math.min(totalPages, current + 1))}
             disabled={page >= totalPages}
           >
-            Próxima
+            Next
           </button>
         </div>
 
         <div className="history-block">
-          <h3>Histórico de datasets gerados</h3>
+          <h3>Generated dataset history</h3>
           {history.length === 0 ? (
-            <p>Nenhum arquivo histórico encontrado.</p>
+            <p>No history files found.</p>
           ) : (
             <ul>
               {history.map((item) => {
@@ -413,12 +719,12 @@ function App() {
                   <li key={item.fileName} className="history-item">
                     <div className="history-main">
                       <strong>
-                        {item.fileName} ({item.size} itens)
+                        {item.fileName} ({item.size} items)
                       </strong>
                       <span>
                         {item.generatedAt
-                          ? new Date(item.generatedAt).toLocaleString('pt-BR')
-                          : 'Data indisponível'}
+                          ? new Date(item.generatedAt).toLocaleString('en-US')
+                          : 'Date unavailable'}
                       </span>
                     </div>
                     <div className="history-actions">
@@ -428,7 +734,7 @@ function App() {
                         onClick={() => handleLoadHistoryDataset(item.fileName)}
                         disabled={isBusy}
                       >
-                        {actionState === 'loading' ? 'Carregando...' : 'Carregar'}
+                        {actionState === 'loading' ? 'Loading...' : 'Load'}
                       </button>
                       <button
                         type="button"
@@ -436,7 +742,7 @@ function App() {
                         onClick={() => handleDeleteHistoryDataset(item.fileName)}
                         disabled={isBusy}
                       >
-                        {actionState === 'deleting' ? 'Excluindo...' : 'Excluir'}
+                        {actionState === 'deleting' ? 'Deleting...' : 'Delete'}
                       </button>
                     </div>
                   </li>
@@ -453,7 +759,7 @@ function App() {
     <main className="app-shell">
       <header>
         <h1>LLM Benchmark Tool</h1>
-        <p>Fluxo visual para gerar dataset, rodar modelos, avaliar e revisar resultados.</p>
+        <p>Visual workflow to generate dataset, run models, evaluate and review results.</p>
       </header>
 
       <nav className="stage-tabs">

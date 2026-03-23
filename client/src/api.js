@@ -69,3 +69,12 @@ export async function getInstalledModels() {
   const response = await fetch(`${API_BASE_URL}/runner/models`);
   return parseResponse(response);
 }
+
+export async function runSingleExtraction(model, input) {
+  const response = await fetch(`${API_BASE_URL}/runner/extract`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, input }),
+  });
+  return parseResponse(response);
+}
