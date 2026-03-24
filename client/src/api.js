@@ -78,3 +78,14 @@ export async function runSingleExtraction(model, input) {
   });
   return parseResponse(response);
 }
+
+export async function uploadCsvDataset(file) {
+  const formData = new FormData();
+  formData.append('file', file);
+
+  const response = await fetch(`${API_BASE_URL}/dataset/upload-csv`, {
+    method: 'POST',
+    body: formData,
+  });
+  return parseResponse(response);
+}

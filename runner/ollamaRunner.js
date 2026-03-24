@@ -19,7 +19,15 @@ function tryParseJson(rawOutput) {
   try {
     return JSON.parse(rawOutput);
   } catch (_error) {
-    return null;
+    const cleaned = `${rawOutput ?? ''}`.trim();
+    const fenceMatch = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    const withoutFence = fenceMatch ? fenceMatch[1].trim() : cleaned;
+
+    try {
+      return JSON.parse(withoutFence);
+    } catch (_secondError) {
+      return null;
+    }
   }
 }
 

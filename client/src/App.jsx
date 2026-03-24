@@ -7,6 +7,7 @@ import {
   getLatestDataset,
   getInstalledModels,
   runSingleExtraction,
+  uploadCsvDataset,
 } from './api';
 import './App.css';
 
@@ -57,10 +58,20 @@ function buildEvaluationRows(results = []) {
   });
 }
 
+function csvEscape(value) {
+  const text = `${value ?? ''}`;
+  if (text.includes('"') || text.includes(',') || text.includes('\n')) {
+    return `"${text.replace(/"/g, '""')}"`;
+  }
+  return text;
+}
+
 function App() {
   const [activeStage, setActiveStage] = useState(0);
+  const [datasetInputMode, setDatasetInputMode] = useState('generated');
   const [size, setSize] = useState(50);
   const [datasetLocale, setDatasetLocale] = useState('mixed');
+  const [uploadedFile, setUploadedFile] = useState(null);
   const [dataset, setDataset] = useState([]);
   const [metadata, setMetadata] = useState(null);
   const [history, setHistory] = useState([]);
@@ -158,6 +169,30 @@ function App() {
       setSuccessMessage('Dataset generated successfully.');
     } catch (err) {
       setError(err.message || 'Failed to generate dataset.');
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleUploadCsv() {
+    if (!uploadedFile) {
+      setError('Select a CSV file first.');
+      return;
+    }
+
+    setLoading(true);
+    setError('');
+    setSuccessMessage('');
+    try {
+      const response = await uploadCsvDataset(uploadedFile);
+      setDataset(response.items || []);
+      setMetadata(response.metadata || null);
+      setPage(1);
+      const historyResponse = await getDatasetHistory();
+      setHistory(historyResponse.items || []);
+      setSuccessMessage('CSV uploaded and normalized successfully.');
+    } catch (err) {
+      setError(err.message || 'Failed to upload CSV.');
     } finally {
       setLoading(false);
     }
@@ -269,6 +304,7 @@ function App() {
           results.push({
             input: item.input,
             expected: item.expected ?? null,
+            source_original: item.source_original ?? null,
             raw_output: response.raw_output,
             parsed_json: response.parsed_json,
             execution_time_ms: response.execution_time_ms,
@@ -279,6 +315,7 @@ function App() {
           results.push({
             input: item.input,
             expected: item.expected ?? null,
+            source_original: item.source_original ?? null,
             raw_output: '',
             parsed_json: null,
             execution_time_ms: 0,
@@ -337,6 +374,40 @@ function App() {
       ...current,
       current: 'Cancel requested. Finishing current request...',
     }));
+  }
+
+  function handleExportRunnerCsv() {
+    if (!runnerResult?.results?.length) {
+      return;
+    }
+
+    const header = ['name', 'address1', 'address2', 'city', 'region', 'country', 'postal'];
+    const lines = [header.join(',')];
+
+    for (const row of runnerResult.results) {
+      const original = row.source_original || {};
+      const parsed = row.parsed_json || {};
+
+      const line = [
+        original.name || '',
+        parsed.street || original.address1 || '',
+        original.address2 || '',
+        parsed.city || original.city || '',
+        parsed.state || original.region || '',
+        parsed.country || original.country || '',
+        parsed.postal_code || original.postal || '',
+      ].map(csvEscape);
+
+      lines.push(line.join(','));
+    }
+
+    const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'llm_output_normalized.csv';
+    link.click();
+    URL.revokeObjectURL(url);
   }
 
   async function handleRefreshModels() {
@@ -406,6 +477,11 @@ function App() {
             <button type="button" onClick={handleRunBenchmark} disabled={runnerLoading}>
               {runnerLoading ? 'Running...' : 'Run benchmark'}
             </button>
+            {metadata?.source_type === 'uploaded_csv' && runnerResult?.results?.length ? (
+              <button type="button" className="secondary" onClick={handleExportRunnerCsv}>
+                Export LLM output CSV
+              </button>
+            ) : null}
             {runnerLoading ? (
               <button
                 type="button"
@@ -447,9 +523,9 @@ function App() {
               <p>Average latency: {summary.avg_latency_ms} ms</p>
               <p>Total elapsed time: {formatElapsedTime(summary.total_elapsed_ms)}</p>
             </div>
-          ) : (
+          ) : !runnerLoading ? (
             <p>No execution yet. Click "Run benchmark".</p>
-          )}
+          ) : null}
 
           {allRows.length > 0 ? (
             <div className="table-wrapper">
@@ -483,6 +559,21 @@ function App() {
     }
 
     if (activeStage === 2) {
+      if (metadata?.source_type === 'uploaded_csv') {
+        return (
+          <section className="dataset-card">
+            <h2>Evaluator</h2>
+            <p>
+              Evaluator is currently disabled for uploaded CSV datasets because there is no
+              ground-truth expected output to compare automatically.
+            </p>
+            <p>
+              Use Runner and export the normalized LLM output CSV for now.
+            </p>
+          </section>
+        );
+      }
+
       const currentRow = evaluationRows[evaluationIndex] || null;
       const totalRows = evaluationRows.length;
       const autoApprovedCount = evaluationRows.filter((row) => row.auto_exact_match).length;
@@ -627,31 +718,68 @@ function App() {
       <section className="dataset-card">
         <h2>Dataset Generator</h2>
         <div className="controls-row">
-          <label htmlFor="dataset-size">Number of addresses</label>
-          <input
-            id="dataset-size"
-            type="number"
-            min="10"
-            max="5000"
-            value={size}
-            onChange={(event) => setSize(event.target.value)}
-          />
-          <label htmlFor="dataset-locale">Dataset locale</label>
-          <select
-            id="dataset-locale"
-            value={datasetLocale}
-            onChange={(event) => setDatasetLocale(event.target.value)}
+          <label>Input source</label>
+          <button
+            type="button"
+            className={datasetInputMode === 'generated' ? '' : 'secondary'}
+            onClick={() => setDatasetInputMode('generated')}
             disabled={loading}
           >
-            {DATASET_LOCALE_OPTIONS.map((option) => (
-              <option key={option.value} value={option.value}>
-                {option.label}
-              </option>
-            ))}
-          </select>
-          <button type="button" onClick={handleGenerate} disabled={loading}>
-            {loading ? 'Generating...' : 'Generate dataset'}
+            Generate dataset
           </button>
+          <button
+            type="button"
+            className={datasetInputMode === 'upload' ? '' : 'secondary'}
+            onClick={() => setDatasetInputMode('upload')}
+            disabled={loading}
+          >
+            Upload CSV
+          </button>
+        </div>
+        <div className="controls-row">
+          {datasetInputMode === 'generated' ? (
+            <>
+              <label htmlFor="dataset-size">Number of addresses</label>
+              <input
+                id="dataset-size"
+                type="number"
+                min="10"
+                max="5000"
+                value={size}
+                onChange={(event) => setSize(event.target.value)}
+              />
+              <label htmlFor="dataset-locale">Dataset locale</label>
+              <select
+                id="dataset-locale"
+                value={datasetLocale}
+                onChange={(event) => setDatasetLocale(event.target.value)}
+                disabled={loading}
+              >
+                {DATASET_LOCALE_OPTIONS.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+              <button type="button" onClick={handleGenerate} disabled={loading}>
+                {loading ? 'Generating...' : 'Generate dataset'}
+              </button>
+            </>
+          ) : (
+            <>
+              <label htmlFor="upload-csv">CSV file</label>
+              <input
+                id="upload-csv"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={(event) => setUploadedFile(event.target.files?.[0] || null)}
+                disabled={loading}
+              />
+              <button type="button" onClick={handleUploadCsv} disabled={loading || !uploadedFile}>
+                {loading ? 'Uploading...' : 'Upload and normalize CSV'}
+              </button>
+            </>
+          )}
           <button
             type="button"
             className="secondary"

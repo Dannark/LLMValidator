@@ -1,16 +1,19 @@
 const express = require('express');
+const multer = require('multer');
 const {
   generateAndSaveDatasetWithLocale,
   getLatestDataset,
   getDatasetHistory,
   getDatasetByFileName,
   deleteDatasetFileByFileName,
+  createDatasetFromUploadedCsv,
   MIN_DATASET_SIZE,
   MAX_DATASET_SIZE,
   SUPPORTED_LOCALES,
 } = require('../services/datasetService');
 
 const router = express.Router();
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.post('/generate', async (req, res) => {
   try {
@@ -92,6 +95,29 @@ router.delete('/:fileName', async (req, res) => {
     res.status(400).json({
       ok: false,
       error: error.message || 'Falha ao excluir dataset.',
+    });
+  }
+});
+
+router.post('/upload-csv', upload.single('file'), async (req, res) => {
+  try {
+    if (!req.file) {
+      return res.status(400).json({
+        ok: false,
+        error: 'CSV file is required.',
+      });
+    }
+
+    const csvContent = req.file.buffer.toString('utf8');
+    const response = await createDatasetFromUploadedCsv(csvContent, req.file.originalname);
+    return res.status(201).json({
+      ok: true,
+      ...response,
+    });
+  } catch (error) {
+    return res.status(400).json({
+      ok: false,
+      error: error.message || 'Failed to process uploaded CSV.',
     });
   }
 });

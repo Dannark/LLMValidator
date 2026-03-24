@@ -3,6 +3,13 @@ const {
   buildDataset,
   SUPPORTED_LOCALES,
 } = require(path.join(__dirname, '..', '..', 'dataset', 'generateDataset'));
+const { normalizeUploadedCsv } = require(path.join(
+  __dirname,
+  '..',
+  '..',
+  'dataset',
+  'normalizeUploadedCsv',
+));
 const {
   saveDataset,
   readLatestDataset,
@@ -60,6 +67,30 @@ async function generateAndSaveDatasetWithLocale(size, locale = 'mixed') {
     generatedAt: new Date().toISOString(),
     size,
     locale,
+    source_type: 'generated',
+  };
+
+  const { filePath, latestFilePath } = await saveDataset(items, metadata);
+  return {
+    metadata,
+    filePath,
+    latestFilePath,
+    items,
+  };
+}
+
+async function createDatasetFromUploadedCsv(csvContent, originalFileName = 'uploaded.csv') {
+  const items = normalizeUploadedCsv(csvContent);
+  if (!items.length) {
+    throw new Error('Uploaded CSV did not produce usable rows.');
+  }
+
+  const metadata = {
+    generatedAt: new Date().toISOString(),
+    size: items.length,
+    locale: 'uploaded',
+    source_type: 'uploaded_csv',
+    original_file_name: originalFileName,
   };
 
   const { filePath, latestFilePath } = await saveDataset(items, metadata);
@@ -121,4 +152,5 @@ module.exports = {
   deleteDatasetFileByFileName,
   generateAndSaveDatasetWithLocale,
   SUPPORTED_LOCALES,
+  createDatasetFromUploadedCsv,
 };
