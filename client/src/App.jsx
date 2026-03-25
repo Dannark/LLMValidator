@@ -14,6 +14,7 @@ import './App.css';
 const STAGES = ['Dataset', 'Runner', 'Evaluator', 'Review & Report'];
 const PAGE_SIZE = 12;
 const PREFERRED_MODEL = 'gemma3:4b';
+const RUNNER_TABLE_PREVIEW = 100;
 const EXPECTED_FIELDS = ['street', 'city', 'state', 'postal_code', 'country'];
 const DATASET_LOCALE_OPTIONS = [
   { value: 'mixed', label: 'Mixed (US + BR + DE)' },
@@ -22,11 +23,43 @@ const DATASET_LOCALE_OPTIONS = [
   { value: 'de_DE', label: 'German (Germany)' },
 ];
 
-function formatElapsedTime(ms) {
+/** Human-readable duration: Xh Ym Zs, or Ym Zs, or Zs (same rules as ETA). */
+function formatDurationMs(ms) {
   const totalSeconds = Math.max(0, Math.round((ms || 0) / 1000));
-  const minutes = Math.floor(totalSeconds / 60);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
   const seconds = totalSeconds % 60;
-  return `${minutes}m ${seconds}s`;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function formatElapsedTime(ms) {
+  return formatDurationMs(ms);
+}
+
+function formatEta(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) {
+    return null;
+  }
+  return formatDurationMs(ms);
+}
+
+function computeRunnerEtaMs(results, total, completedCount) {
+  if (completedCount < 3 || total <= completedCount) {
+    return null;
+  }
+  let sum = 0;
+  for (let i = 0; i < completedCount; i += 1) {
+    sum += results[i]?.execution_time_ms || 0;
+  }
+  const avgMs = sum / completedCount;
+  const remaining = total - completedCount;
+  return remaining * avgMs;
 }
 
 function normalizeValue(value) {
@@ -90,11 +123,26 @@ function App() {
   const [runnerProgress, setRunnerProgress] = useState({
     processed: 0,
     total: 0,
-    current: '',
+    currentItem: 0,
+    etaMs: null,
+    notice: '',
+    startedAt: null,
   });
+  const [runnerElapsedTick, setRunnerElapsedTick] = useState(0);
+  const [runnerShowFullTable, setRunnerShowFullTable] = useState(false);
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const runnerCancelRef = useRef(false);
+
+  useEffect(() => {
+    if (!runnerLoading) {
+      return undefined;
+    }
+    const id = setInterval(() => {
+      setRunnerElapsedTick((n) => n + 1);
+    }, 1000);
+    return () => clearInterval(id);
+  }, [runnerLoading]);
 
   useEffect(() => {
     async function bootstrap() {
@@ -271,6 +319,7 @@ function App() {
     setError('');
     setSuccessMessage('');
     setRunnerResult(null);
+    setRunnerShowFullTable(false);
 
     try {
       const limitedCases = dataset.slice(0, Number(runnerLimit));
@@ -283,7 +332,10 @@ function App() {
       setRunnerProgress({
         processed: 0,
         total: limitedCases.length,
-        current: 'Starting execution...',
+        currentItem: 1,
+        etaMs: null,
+        notice: '',
+        startedAt,
       });
 
       for (let index = 0; index < limitedCases.length; index += 1) {
@@ -292,11 +344,13 @@ function App() {
         }
 
         const item = limitedCases[index];
-        const step = `${index + 1}/${limitedCases.length}`;
         setRunnerProgress({
           processed: index,
           total: limitedCases.length,
-          current: `Running prompt ${step}`,
+          currentItem: index + 1,
+          etaMs: computeRunnerEtaMs(results, limitedCases.length, index),
+          notice: '',
+          startedAt,
         });
 
         try {
@@ -337,7 +391,10 @@ function App() {
       setRunnerProgress({
         processed,
         total: limitedCases.length,
-        current: runnerCancelRef.current ? 'Execution canceled by user.' : 'Execution completed.',
+        currentItem: limitedCases.length,
+        etaMs: null,
+        notice: runnerCancelRef.current ? 'Execution canceled by user.' : 'Execution completed.',
+        startedAt,
       });
       setRunnerResult({
         model: runnerModel,
@@ -372,7 +429,7 @@ function App() {
     setRunnerCancelRequested(true);
     setRunnerProgress((current) => ({
       ...current,
-      current: 'Cancel requested. Finishing current request...',
+      notice: 'Cancel requested. Finishing current request...',
     }));
   }
 
@@ -436,6 +493,14 @@ function App() {
       const progressPercent = runnerProgress.total
         ? Math.round((runnerProgress.processed / runnerProgress.total) * 100)
         : 0;
+      const runnerElapsedMs =
+        runnerLoading && runnerProgress.startedAt != null
+          ? Date.now() - runnerProgress.startedAt
+          : 0;
+      void runnerElapsedTick;
+      const tableRows = runnerShowFullTable
+        ? allRows
+        : allRows.slice(0, RUNNER_TABLE_PREVIEW);
       return (
         <section className="dataset-card">
           <h2>Runner Ollama</h2>
@@ -507,9 +572,18 @@ function App() {
             <div className="runner-summary">
               <strong>Progress</strong>
               <p>
-                {runnerProgress.processed}/{runnerProgress.total} ({progressPercent}%)
+                Item {runnerProgress.currentItem} of {runnerProgress.total} ({progressPercent}%)
               </p>
-              <p>{runnerProgress.current || 'Waiting for execution...'}</p>
+              <p>
+                Elapsed: {formatElapsedTime(runnerElapsedMs)}
+                {!runnerProgress.notice && formatEta(runnerProgress.etaMs) ? (
+                  <>
+                    {' '}
+                    · ~{formatEta(runnerProgress.etaMs)} remaining (estimate)
+                  </>
+                ) : null}
+              </p>
+              {runnerProgress.notice ? <p>{runnerProgress.notice}</p> : null}
               <progress value={runnerProgress.processed} max={Math.max(1, runnerProgress.total)} />
             </div>
           ) : null}
@@ -539,7 +613,7 @@ function App() {
                   </tr>
                 </thead>
                 <tbody>
-                  {allRows.map((row, index) => (
+                  {tableRows.map((row, index) => (
                     <tr
                       key={`${row.input}-${index}`}
                       className={row.json_valid ? '' : 'row-json-invalid'}
@@ -552,6 +626,22 @@ function App() {
                   ))}
                 </tbody>
               </table>
+              {allRows.length > RUNNER_TABLE_PREVIEW ? (
+                <div className="meta-row" style={{ marginTop: '0.5rem' }}>
+                  <span>
+                    {runnerShowFullTable
+                      ? `Showing all ${allRows.length} records.`
+                      : `Showing first ${RUNNER_TABLE_PREVIEW} of ${allRows.length} records.`}
+                  </span>
+                  <button
+                    type="button"
+                    className="secondary"
+                    onClick={() => setRunnerShowFullTable((v) => !v)}
+                  >
+                    {runnerShowFullTable ? 'Show first 100 only' : 'Show all records'}
+                  </button>
+                </div>
+              ) : null}
             </div>
           ) : null}
         </section>

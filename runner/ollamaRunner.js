@@ -15,20 +15,59 @@ function buildPrompt(inputText) {
   ].join('\n');
 }
 
-function tryParseJson(rawOutput) {
+function parseJsonLenient(text) {
   try {
-    return JSON.parse(rawOutput);
-  } catch (_error) {
-    const cleaned = `${rawOutput ?? ''}`.trim();
-    const fenceMatch = cleaned.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
-    const withoutFence = fenceMatch ? fenceMatch[1].trim() : cleaned;
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
 
-    try {
-      return JSON.parse(withoutFence);
-    } catch (_secondError) {
-      return null;
+/**
+ * Parses model output that may be raw JSON or wrapped in markdown fences (```json ... ```),
+ * optionally with extra prose before/after the fence.
+ */
+function tryParseJson(rawOutput) {
+  const cleaned = `${rawOutput ?? ''}`.trim();
+  if (!cleaned) {
+    return null;
+  }
+
+  const direct = parseJsonLenient(cleaned);
+  if (direct !== null) {
+    return direct;
+  }
+
+  // Entire string is one fenced block (common case)
+  const fullFence = /^```(?:json)?\s*\n?([\s\S]*?)\n?```\s*$/im.exec(cleaned);
+  if (fullFence) {
+    const inner = fullFence[1].trim();
+    const parsed = parseJsonLenient(inner);
+    if (parsed !== null) {
+      return parsed;
     }
   }
+
+  // First fenced block anywhere (e.g. "Here is the result:\n```json\n{...}\n```")
+  const embedded = /```(?:json)?\s*\n?([\s\S]*?)\n?```/gi;
+  let match;
+  while ((match = embedded.exec(cleaned)) !== null) {
+    const inner = match[1].trim();
+    const parsed = parseJsonLenient(inner);
+    if (parsed !== null) {
+      return parsed;
+    }
+  }
+
+  // Last resort: object between first "{" and last "}"
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    const sliced = cleaned.slice(start, end + 1);
+    return parseJsonLenient(sliced);
+  }
+
+  return null;
 }
 
 async function runOllamaExtraction({ model, input }) {
