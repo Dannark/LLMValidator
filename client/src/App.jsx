@@ -70,7 +70,14 @@ function isExactRowMatch(expected, parsed) {
   if (!expected || !parsed) {
     return false;
   }
-  return EXPECTED_FIELDS.every((field) => normalizeValue(expected[field]) === normalizeValue(parsed[field]));
+  const mapped = {
+    street: parsed.address1 ?? parsed.street ?? '',
+    city: parsed.city ?? '',
+    state: parsed.region ?? parsed.state ?? '',
+    postal_code: parsed.postal ?? parsed.postal_code ?? '',
+    country: parsed.country ?? '',
+  };
+  return EXPECTED_FIELDS.every((field) => normalizeValue(expected[field]) === normalizeValue(mapped[field]));
 }
 
 function buildEvaluationRows(results = []) {
@@ -446,13 +453,13 @@ function App() {
       const parsed = row.parsed_json || {};
 
       const line = [
-        original.name || '',
-        parsed.street || original.address1 || '',
-        original.address2 || '',
+        parsed.name || original.name || '',
+        parsed.address1 || parsed.street || original.address1 || '',
+        parsed.address2 || original.address2 || '',
         parsed.city || original.city || '',
-        parsed.state || original.region || '',
+        parsed.region || parsed.state || original.region || '',
         parsed.country || original.country || '',
-        parsed.postal_code || original.postal || '',
+        parsed.postal || parsed.postal_code || original.postal || '',
       ].map(csvEscape);
 
       lines.push(line.join(','));

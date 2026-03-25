@@ -1,16 +1,57 @@
 const { runOllamaExtraction, listInstalledOllamaModels } = require('../../runner/ollamaRunner');
 
-function sanitizeOutput(parsedJson) {
+function normalizeCountryValue(rawCountry) {
+  const value = `${rawCountry ?? ''}`.trim();
+  if (!value) {
+    return '';
+  }
+  const upper = value.toUpperCase();
+  if (upper === 'USA' || upper === 'US' || upper === 'UNITED STATES OF AMERICA') {
+    return 'United States';
+  }
+  if (upper === 'BR' || upper === 'BRAZIL') {
+    return 'Brazil';
+  }
+  if (upper === 'DE' || upper === 'GERMANY') {
+    return 'Germany';
+  }
+  if (upper === 'UAE' || upper === 'UNITED ARAB EMIRATES') {
+    return 'United Arab Emirates';
+  }
+  // Keep as-is (trimmed) for other countries (Canada, Israel, etc.)
+  return value;
+}
+
+function inferCountryFromInput(inputText) {
+  const text = `${inputText ?? ''}`.toUpperCase();
+  if (/\b(UNITED STATES|USA|US)\b/.test(text)) return 'United States';
+  if (/\bCANADA\b/.test(text)) return 'Canada';
+  if (/\b(BRAZIL|BR)\b/.test(text)) return 'Brazil';
+  if (/\b(GERMANY|DE)\b/.test(text)) return 'Germany';
+  if (/\bISRAEL\b/.test(text)) return 'Israel';
+  if (/\bAUSTRALIA\b/.test(text)) return 'Australia';
+  if (/\b(UNITED ARAB EMIRATES|UAE)\b/.test(text)) return 'United Arab Emirates';
+  if (/\bGUATEMALA\b/.test(text)) return 'Guatemala';
+  return '';
+}
+
+function sanitizeOutput(parsedJson, inputText) {
   if (!parsedJson || typeof parsedJson !== 'object') {
     return null;
   }
 
+  const inferredCountry = inferCountryFromInput(inputText);
+  const normalizedCountry = normalizeCountryValue(parsedJson.country);
+  const country = inferredCountry || normalizedCountry;
+
   return {
-    street: `${parsedJson.street ?? ''}`.trim(),
+    name: `${parsedJson.name ?? ''}`.trim(),
+    address1: `${parsedJson.address1 ?? parsedJson.street ?? ''}`.trim(),
+    address2: `${parsedJson.address2 ?? ''}`.trim(),
     city: `${parsedJson.city ?? ''}`.trim(),
-    state: `${parsedJson.state ?? ''}`.trim(),
-    postal_code: `${parsedJson.postal_code ?? ''}`.trim(),
-    country: `${parsedJson.country ?? ''}`.trim(),
+    region: `${parsedJson.region ?? parsedJson.state ?? ''}`.trim(),
+    postal: `${parsedJson.postal ?? parsedJson.postal_code ?? ''}`.trim(),
+    country,
   };
 }
 
@@ -20,7 +61,7 @@ async function runSingleCase({ model, input, expected = null }) {
     input,
     expected,
     ...result,
-    parsed_json: sanitizeOutput(result.parsed_json),
+    parsed_json: sanitizeOutput(result.parsed_json, input),
   };
 }
 
