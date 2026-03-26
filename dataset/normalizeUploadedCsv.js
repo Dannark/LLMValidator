@@ -2,17 +2,66 @@ function cleanCell(value) {
   return `${value ?? ''}`.replace(/\s+/g, ' ').trim();
 }
 
-function splitCsvLine(line) {
-  return line.split(';').map(cleanCell);
+function detectDelimiter(line) {
+  const raw = `${line ?? ''}`;
+  let inQuotes = false;
+  let commaCount = 0;
+  let semicolonCount = 0;
+
+  for (let i = 0; i < raw.length; i += 1) {
+    const char = raw[i];
+    const next = raw[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        i += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (!inQuotes && char === ',') {
+      commaCount += 1;
+    } else if (!inQuotes && char === ';') {
+      semicolonCount += 1;
+    }
+  }
+
+  return semicolonCount >= commaCount ? ';' : ',';
 }
 
-function looksLikeAddressLine(value) {
-  return /\d/.test(value) || /\b(st|street|ave|avenue|road|rd|lane|ln|blvd|drive|dr|suite|ste|unit|po box|travessa|rua|avenida)\b/i.test(value);
-}
+function splitCsvLine(line, delimiter) {
+  const raw = `${line ?? ''}`;
+  const values = [];
+  let current = '';
+  let inQuotes = false;
 
-function looksLikeUsCityStateZip(value) {
-  const cleaned = cleanCell(value);
-  return /(.*?)[,\s]+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/.test(cleaned);
+  for (let i = 0; i < raw.length; i += 1) {
+    const char = raw[i];
+    const next = raw[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+        continue;
+      }
+      inQuotes = !inQuotes;
+      continue;
+    }
+
+    if (!inQuotes && char === delimiter) {
+      values.push(cleanCell(current));
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  values.push(cleanCell(current));
+  return values;
 }
 
 function detectZipSortIndex(columns) {
@@ -34,48 +83,9 @@ function detectZipSortIndex(columns) {
   return Math.max(1, columns.length - 1);
 }
 
-function extractCityRegionPostal(parts) {
-  const joined = cleanCell(parts.join(' '));
-  const countryMatch = /\b(UNITED STATES|USA|US|CANADA|BRAZIL|BR|GERMANY|DE|ISRAEL|AUSTRALIA|UNITED ARAB EMIRATES|UAE|GUATEMALA)\b/i.exec(
-    joined,
-  );
-  const rawCountry = countryMatch ? countryMatch[1].toUpperCase() : '';
-  const country =
-    rawCountry === 'USA' || rawCountry === 'US'
-      ? 'UNITED STATES'
-      : rawCountry === 'BR'
-        ? 'BRAZIL'
-        : rawCountry === 'DE'
-          ? 'GERMANY'
-          : rawCountry === 'UAE'
-            ? 'UNITED ARAB EMIRATES'
-            : rawCountry || '';
-
-  for (const line of parts) {
-    const noCountry = cleanCell(
-      line.replace(
-        /\b(UNITED STATES|USA|US|CANADA|BRAZIL|BR|GERMANY|DE|ISRAEL|AUSTRALIA|UNITED ARAB EMIRATES|UAE|GUATEMALA)\b/gi,
-        '',
-      ),
-    );
-    const match = /(.*?)[,\s]+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/.exec(noCountry);
-    if (match) {
-      return {
-        city: cleanCell(match[1]),
-        region: cleanCell(match[2]),
-        postal: cleanCell(match[3]),
-        country,
-      };
-    }
-  }
-
-  return { city: '', region: '', postal: '', country };
-}
-
-function buildPromptFromNormalized(row) {
-  // We intentionally include name lines + address lines (as in the original CSV range)
-  // because sometimes the name spans multiple columns and address starts later.
-  return [row.name, row.address1, row.address2, row.city, row.region, row.postal, row.country]
+function buildPromptFromColumns(columns, zipSortIndex) {
+  return columns
+    .slice(1, zipSortIndex + 1)
     .map(cleanCell)
     .filter(Boolean)
     .join(', ');
@@ -83,59 +93,23 @@ function buildPromptFromNormalized(row) {
 
 function normalizeAddressRow(columns) {
   const zipSortIndex = detectZipSortIndex(columns);
-  const rawLines = columns
-    .slice(1, zipSortIndex + 1)
-    .map(cleanCell)
-    .filter(Boolean);
-  const zipSort = cleanCell(columns[zipSortIndex]);
+  const zipSort = cleanCell(columns[zipSortIndex] || '');
+  const postal = cleanCell(columns[6] || '') || zipSort;
 
-  const nameLines = [];
-  const addressParts = [];
-  let startedAddress = false;
-
-  for (const value of rawLines) {
-    if (!startedAddress) {
-      const isAddressish =
-        looksLikeAddressLine(value) ||
-        looksLikeUsCityStateZip(value) ||
-        /\b(UNITED STATES|USA|US|CANADA|BRAZIL|BR|GERMANY|DE|ISRAEL|AUSTRALIA|UNITED ARAB EMIRATES|UAE|GUATEMALA)\b/i.test(
-          value,
-        );
-      if (!isAddressish) {
-        nameLines.push(value);
-        continue;
-      }
-      startedAddress = true;
-    }
-    addressParts.push(value);
-  }
-
-  const name = nameLines.join(' ').trim();
-
-  const cityRegionPostal = extractCityRegionPostal(addressParts);
-  const locationLineIndex = addressParts.findIndex((line) =>
-    /(.*?)[,\s]+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)/.test(
-      cleanCell(
-        line.replace(
-          /\b(UNITED STATES|USA|US|CANADA|BRAZIL|BR|GERMANY|DE|ISRAEL|AUSTRALIA|UNITED ARAB EMIRATES|UAE|GUATEMALA)\b/gi,
-          '',
-        ),
-      ),
-    ),
-  );
-
-  const streetLines = addressParts.filter((_line, index) => index !== locationLineIndex);
-  const address1 = streetLines[0] || '';
-  const address2 = streetLines.slice(1).join(', ');
+  const name = [columns[1], columns[2], columns[3]].map(cleanCell).filter(Boolean).join(' ');
+  const city = cleanCell(columns[4] || '');
+  const region = cleanCell(columns[5] || '');
+  const country = cleanCell(columns[7] || '');
 
   return {
     name,
-    address1,
-    address2,
-    city: cityRegionPostal.city,
-    region: cityRegionPostal.region,
-    country: cityRegionPostal.country,
-    postal: cityRegionPostal.postal || zipSort,
+    address1: cleanCell(columns[2] || ''),
+    address2: cleanCell(columns[3] || ''),
+    city,
+    region,
+    country,
+    postal,
+    zip_sort: zipSort,
   };
 }
 
@@ -145,8 +119,10 @@ function normalizeUploadedCsv(csvText) {
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
 
+  const firstNonEmptyLine = lines[0] || '';
+  const delimiter = detectDelimiter(firstNonEmptyLine);
   const headerIndex = lines.findIndex((line) =>
-    line.startsWith('SHARES;1ST LINE OF NAME & ADDRESS;'),
+    /SHARES.*1ST LINE OF NAME & ADDRESS/i.test(line),
   );
 
   // Some user-edited files may not include the original header.
@@ -154,7 +130,7 @@ function normalizeUploadedCsv(csvText) {
   const normalizedRows = [];
 
   for (const line of dataLines) {
-    const columns = splitCsvLine(line);
+    const columns = splitCsvLine(line, delimiter);
     if (columns.length < 9) {
       continue;
     }
@@ -165,8 +141,9 @@ function normalizeUploadedCsv(csvText) {
       continue;
     }
 
+    const zipSortIndex = detectZipSortIndex(columns);
     const normalized = normalizeAddressRow(columns);
-    const prompt = buildPromptFromNormalized(normalized);
+    const prompt = buildPromptFromColumns(columns, zipSortIndex);
     if (!prompt) {
       continue;
     }

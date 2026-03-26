@@ -449,17 +449,16 @@ function App() {
     const lines = [header.join(',')];
 
     for (const row of runnerResult.results) {
-      const original = row.source_original || {};
       const parsed = row.parsed_json || {};
 
       const line = [
-        parsed.name || original.name || '',
-        parsed.address1 || parsed.street || original.address1 || '',
-        parsed.address2 || original.address2 || '',
-        parsed.city || original.city || '',
-        parsed.region || parsed.state || original.region || '',
-        parsed.country || original.country || '',
-        parsed.postal || parsed.postal_code || original.postal || '',
+        parsed.name || '',
+        parsed.address1 || parsed.street || '',
+        parsed.address2 || '',
+        parsed.city || '',
+        parsed.region || parsed.state || '',
+        parsed.country || '',
+        parsed.postal || parsed.postal_code || '',
       ].map(csvEscape);
 
       lines.push(line.join(','));
@@ -613,6 +612,7 @@ function App() {
               <table>
                 <thead>
                   <tr>
+                    <th>#</th>
                     <th>Input</th>
                     <th>Valid JSON</th>
                     <th>Latency (ms)</th>
@@ -625,6 +625,7 @@ function App() {
                       key={`${row.input}-${index}`}
                       className={row.json_valid ? '' : 'row-json-invalid'}
                     >
+                      <td>{index + 1}</td>
                       <td>{row.input}</td>
                       <td>{row.json_valid ? 'Yes' : 'No'}</td>
                       <td>{row.execution_time_ms}</td>

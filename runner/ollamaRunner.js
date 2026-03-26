@@ -3,7 +3,7 @@ const OLLAMA_TAGS_URL = 'http://localhost:11434/api/tags';
 
 function buildPrompt(inputText) {
   return [
-    'You are a strict JSON extractor.',
+    "You're a name and address parser. You should extract it from a string that has name and address together.",
     'Extract the address fields from the input text and return ONLY valid JSON.',
     'Do not include markdown, explanations, or extra keys.',
     'Required keys: name, address1, address2, city, region, postal, country.',
@@ -16,6 +16,8 @@ function buildPrompt(inputText) {
     '- Put the main street/number (and PO Box) in address1.',
     '- Put unit/suite/apartment/building/floor and other complements in address2.',
     '- Put ONLY the customer/entity name in name. Do NOT repeat the address inside name.',
+    '- If uncertain, preserve tokens from input instead of inventing or normalizing.',
+    '- Do NOT drop meaningful address fragments; keep overflow/complements in address2.',
     'Output format:',
     '{"name":"","address1":"","address2":"","city":"","region":"","postal":"","country":""}',
     '',
