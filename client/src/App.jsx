@@ -100,10 +100,7 @@ function buildEvaluationRows(results = []) {
 
 function csvEscape(value) {
   const text = `${value ?? ''}`;
-  if (text.includes('"') || text.includes(',') || text.includes('\n')) {
-    return `"${text.replace(/"/g, '""')}"`;
-  }
-  return text;
+  return `"${text.replace(/"/g, '""')}"`;
 }
 
 function App() {
