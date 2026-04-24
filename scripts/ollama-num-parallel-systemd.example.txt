@@ -1,0 +1,29 @@
+# Increase OLLAMA_NUM_PARALLEL on the Ollama host (Linux + systemd)
+#
+# Ollama limits how many requests per model run truly in parallel. The app can
+# open many HTTP connections; this setting raises Ollama's own cap (uses more VRAM).
+#
+# Typical: 4–8 on a 24GB GPU; start lower and raise while watching `nvidia-smi`.
+#
+# --- Option A: systemctl edit (recommended) ---
+#   sudo systemctl edit ollama
+#
+# Paste this block, save, exit:
+#
+#   [Service]
+#   Environment="OLLAMA_NUM_PARALLEL=8"
+#
+# Then:
+#   sudo systemctl daemon-reload
+#   sudo systemctl restart ollama
+#
+# --- Option B: one-shot for testing (current shell only) ---
+#   export OLLAMA_NUM_PARALLEL=8
+#   ollama serve
+#
+# --- Verify ---
+#   systemctl show ollama --property=Environment
+#   curl -s http://127.0.0.1:11434/api/tags
+#
+# Match or exceed the "Parallel requests" value in the LLM Benchmark Runner UI,
+# or the extra requests will queue inside Ollama.

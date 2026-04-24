@@ -179,3 +179,9 @@ td {
   color: #b91c1c;
   background: #fef2f2;
 }
+
+.row-pending td {
+  color: #64748b;
+  font-style: italic;
+  background: #f1f5f9;
+}

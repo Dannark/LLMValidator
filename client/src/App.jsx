@@ -1,13 +1,15 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  cancelRunnerBenchmark,
   deleteDatasetByFileName,
   generateDataset,
   getDatasetByFileName,
   getDatasetHistory,
   getLatestDataset,
   getInstalledModels,
+  getRunnerBenchmarkStatus,
   getSystemMetrics,
-  runSingleExtraction,
+  startRunnerBenchmark,
   uploadCsvDataset,
 } from './api';
 import './App.css';
@@ -57,6 +59,36 @@ function computeRunnerEtaFromLatencies(latenciesMs, total, completedCount) {
   }
   const avgMs = latenciesMs.reduce((a, b) => a + b, 0) / latenciesMs.length;
   return (total - completedCount) * avgMs;
+}
+
+function mergeRunnerRowsFromStatus(statusPayload) {
+  if (!statusPayload || statusPayload.status === 'idle') {
+    return [];
+  }
+  if (statusPayload.status === 'running') {
+    const { cases, results } = statusPayload;
+    if (!Array.isArray(cases) || !Array.isArray(results)) {
+      return [];
+    }
+    return cases.map((item, i) => {
+      const r = results[i];
+      if (r) {
+        return r;
+      }
+      return {
+        input: item.input ?? '',
+        expected: item.expected ?? null,
+        source_original: item.source_original ?? null,
+        raw_output: '',
+        parsed_json: null,
+        execution_time_ms: 0,
+        json_valid: false,
+        error: null,
+        pending: true,
+      };
+    });
+  }
+  return Array.isArray(statusPayload.results) ? statusPayload.results : [];
 }
 
 function normalizeValue(value) {
@@ -349,14 +381,15 @@ function App() {
   });
   const [runnerElapsedTick, setRunnerElapsedTick] = useState(0);
   const [runnerShowFullTable, setRunnerShowFullTable] = useState(false);
+  const [runnerHasCsv, setRunnerHasCsv] = useState(false);
   const [evaluatorGroundTruthRows, setEvaluatorGroundTruthRows] = useState(null);
   const [evaluatorGroundTruthFileName, setEvaluatorGroundTruthFileName] = useState('');
   const [evaluatorGroundTruthError, setEvaluatorGroundTruthError] = useState('');
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
-  const runnerCancelRef = useRef(false);
   const groundTruthFileInputRef = useRef(null);
   const runnerMetricsPollRef = useRef(null);
+  const runnerStartInFlightRef = useRef(false);
 
   useEffect(() => {
     if (!runnerLoading) {
@@ -394,6 +427,96 @@ function App() {
       }
     };
   }, [runnerLoading]);
+
+  useEffect(() => {
+    if (activeStage !== 1) {
+      return undefined;
+    }
+    let stopped = false;
+
+    async function pollRunnerSession() {
+      try {
+        if (runnerStartInFlightRef.current) {
+          return;
+        }
+        const s = await getRunnerBenchmarkStatus();
+        if (stopped) {
+          return;
+        }
+        if (runnerStartInFlightRef.current) {
+          return;
+        }
+        setRunnerHasCsv(s.hasCsv === true);
+
+        if (s.status === 'idle') {
+          setRunnerResult(null);
+          setRunnerLoading(false);
+          setRunnerCancelRequested(false);
+          setRunnerProgress({
+            processed: 0,
+            total: 0,
+            currentItem: 0,
+            etaMs: null,
+            notice: '',
+            startedAt: null,
+            inFlight: 0,
+            concurrency: 1,
+          });
+          return;
+        }
+
+        const rows = mergeRunnerRowsFromStatus(s);
+        const isTerminal = s.status === 'completed' || s.status === 'canceled' || s.status === 'error';
+        setRunnerLoading(s.status === 'running');
+        if (s.model) {
+          setRunnerModel(s.model);
+        }
+
+        let notice = '';
+        if (s.status === 'running') {
+          notice = s.cancelRequested ? 'Cancel requested. Finishing current requests…' : '';
+        } else if (s.status === 'canceled') {
+          notice = 'Execution canceled.';
+        } else if (s.status === 'error') {
+          notice = s.lastError || 'Benchmark failed.';
+        } else if (s.status === 'completed') {
+          notice = 'Execution completed.';
+        }
+
+        setRunnerProgress({
+          processed: s.completedCount ?? 0,
+          total: s.total ?? 0,
+          currentItem: Math.min((s.completedCount ?? 0) + (s.inFlight ?? 0), s.total ?? 0),
+          etaMs: computeRunnerEtaFromLatencies(s.latenciesMs || [], s.total ?? 0, s.completedCount ?? 0),
+          notice,
+          startedAt: s.startedAt ?? null,
+          inFlight: s.inFlight ?? 0,
+          concurrency: s.concurrency ?? 1,
+        });
+
+        setRunnerResult({
+          model: s.model,
+          summary: isTerminal ? s.summary : null,
+          results: rows,
+          runStatus: s.status,
+          lastError: s.lastError ?? null,
+        });
+
+        if (isTerminal) {
+          setRunnerCancelRequested(false);
+        }
+      } catch {
+        // Keep current UI if the status endpoint is unreachable.
+      }
+    }
+
+    pollRunnerSession();
+    const intervalId = setInterval(pollRunnerSession, 800);
+    return () => {
+      stopped = true;
+      clearInterval(intervalId);
+    };
+  }, [activeStage]);
 
   useEffect(() => {
     async function bootstrap() {
@@ -579,7 +702,6 @@ function App() {
   async function handleRunBenchmark() {
     setRunnerLoading(true);
     setRunnerCancelRequested(false);
-    runnerCancelRef.current = false;
     setError('');
     setSuccessMessage('');
     setRunnerResult(null);
@@ -591,172 +713,39 @@ function App() {
         throw new Error('Load or generate a dataset before running the benchmark.');
       }
 
-      const total = limitedCases.length;
       const rawConc = Number(runnerConcurrency);
       const concurrency = Math.min(
         64,
         Math.max(1, Number.isFinite(rawConc) && rawConc > 0 ? Math.floor(rawConc) : 1),
       );
 
-      const startedAt = Date.now();
-      const results = new Array(total);
-      const latencies = [];
-      let nextIdx = 0;
-      let inFlight = 0;
-      let completed = 0;
-
-      function takeNext() {
-        if (runnerCancelRef.current) {
-          return -1;
-        }
-        if (nextIdx >= total) {
-          return -2;
-        }
-        const idx = nextIdx;
-        nextIdx += 1;
-        return idx;
+      runnerStartInFlightRef.current = true;
+      try {
+        await startRunnerBenchmark(runnerModel, limitedCases, concurrency);
+      } finally {
+        runnerStartInFlightRef.current = false;
       }
-
-      function pushProgress(notice = '') {
-        setRunnerProgress({
-          processed: completed,
-          total,
-          currentItem: Math.min(completed + inFlight, total),
-          etaMs: computeRunnerEtaFromLatencies(latencies, total, completed),
-          notice,
-          startedAt,
-          inFlight,
-          concurrency,
-        });
-      }
-
-      setRunnerProgress({
-        processed: 0,
-        total,
-        currentItem: Math.min(concurrency, total),
-        etaMs: null,
-        notice: '',
-        startedAt,
-        inFlight: 0,
-        concurrency,
-      });
-
-      async function worker() {
-        while (true) {
-          const index = takeNext();
-          if (index === -1 || index === -2) {
-            return;
-          }
-          inFlight += 1;
-          pushProgress();
-          const item = limitedCases[index];
-          try {
-            const response = await runSingleExtraction(runnerModel, item.input);
-            results[index] = {
-              input: item.input,
-              expected: item.expected ?? null,
-              source_original: item.source_original ?? null,
-              raw_output: response.raw_output,
-              parsed_json: response.parsed_json,
-              execution_time_ms: response.execution_time_ms,
-              json_valid: response.json_valid,
-              error: null,
-            };
-            latencies.push(response.execution_time_ms || 0);
-          } catch (err) {
-            results[index] = {
-              input: item.input,
-              expected: item.expected ?? null,
-              source_original: item.source_original ?? null,
-              raw_output: '',
-              parsed_json: null,
-              execution_time_ms: 0,
-              json_valid: false,
-              error: err.message || 'Execution failed.',
-            };
-            latencies.push(0);
-          } finally {
-            inFlight -= 1;
-            completed += 1;
-            pushProgress();
-          }
-        }
-      }
-
-      const workers = Math.min(concurrency, total);
-      await Promise.all(Array.from({ length: workers }, () => worker()));
-
-      for (let i = 0; i < total; i += 1) {
-        if (results[i] === undefined) {
-          const item = limitedCases[i];
-          results[i] = {
-            input: item.input,
-            expected: item.expected ?? null,
-            source_original: item.source_original ?? null,
-            raw_output: '',
-            parsed_json: null,
-            execution_time_ms: 0,
-            json_valid: false,
-            error: runnerCancelRef.current ? 'Canceled.' : 'Skipped.',
-          };
-        }
-      }
-
-      const processed = results.length;
-      const validCount = results.filter((item) => item.json_valid).length;
-      const avgLatencyMs = processed
-        ? Math.round(
-            results.reduce((acc, item) => acc + (item.execution_time_ms || 0), 0) / processed,
-          )
-        : 0;
-      const totalElapsedMs = Date.now() - startedAt;
-
-      setRunnerProgress({
-        processed,
-        total,
-        currentItem: total,
-        etaMs: null,
-        notice: runnerCancelRef.current ? 'Execution canceled by user.' : 'Execution completed.',
-        startedAt,
-        inFlight: 0,
-        concurrency,
-      });
-      setRunnerResult({
-        model: runnerModel,
-        summary: {
-          processed,
-          json_valid_count: validCount,
-          json_valid_rate: processed ? validCount / processed : 0,
-          avg_latency_ms: avgLatencyMs,
-          total_elapsed_ms: totalElapsedMs,
-          concurrency,
-        },
-        results,
-      });
-      if (runnerCancelRef.current) {
-        setSuccessMessage(`Runner canceled for ${runnerModel}. Partial results are shown.`);
-      } else {
-        setSuccessMessage(`Runner completed for ${runnerModel}.`);
-      }
+      setSuccessMessage(`Benchmark running on server for ${runnerModel}. You can refresh the page; progress is restored from the server.`);
     } catch (err) {
       setError(err.message || 'Failed to run benchmark.');
-    } finally {
       setRunnerLoading(false);
-      setRunnerCancelRequested(false);
-      runnerCancelRef.current = false;
     }
   }
 
-  function handleCancelRun() {
+  async function handleCancelRun() {
     if (!runnerLoading) {
       return;
     }
-    runnerCancelRef.current = true;
     setRunnerCancelRequested(true);
     setRunnerProgress((current) => ({
       ...current,
-      notice: 'Cancel requested. Finishing current request...',
+      notice: 'Cancel requested. Finishing current requests…',
     }));
+    try {
+      await cancelRunnerBenchmark();
+    } catch (err) {
+      setError(err.message || 'Failed to cancel benchmark.');
+    }
   }
 
   function handleGroundTruthFileChange(event) {
@@ -851,6 +840,7 @@ function App() {
   function renderStageContent() {
     if (activeStage === 1) {
       const summary = runnerResult?.summary;
+      const runStatus = runnerResult?.runStatus;
       const allRows = runnerResult?.results || [];
       const progressPercent = runnerProgress.total
         ? Math.round((runnerProgress.processed / runnerProgress.total) * 100)
@@ -872,7 +862,7 @@ function App() {
               id="runner-model"
               value={runnerModel}
               onChange={(event) => setRunnerModel(event.target.value)}
-              disabled={modelsLoading || availableModels.length === 0}
+              disabled={runnerLoading || modelsLoading || availableModels.length === 0}
             >
               {availableModels.length === 0 ? (
                 <option value="">No models found</option>
@@ -900,6 +890,7 @@ function App() {
               max={Math.max(1, dataset.length)}
               value={runnerLimit}
               onChange={(event) => setRunnerLimit(event.target.value)}
+              disabled={runnerLoading}
             />
             <label htmlFor="runner-concurrency">Parallel requests</label>
             <input
@@ -930,6 +921,17 @@ function App() {
                 {runnerCancelRequested ? 'Cancelling...' : 'Cancel run'}
               </button>
             ) : null}
+            {runnerHasCsv ? (
+              <a
+                className="secondary"
+                href="/api/runner/benchmark/csv"
+                target="_blank"
+                rel="noreferrer"
+                style={{ alignSelf: 'center' }}
+              >
+                Live server CSV
+              </a>
+            ) : null}
           </div>
 
           {error ? <p className="error-message">{error}</p> : null}
@@ -944,7 +946,7 @@ function App() {
 
           {runnerLoading ? (
             <div className="runner-summary">
-              <strong>Host resources (same machine as the Node API)</strong>
+              <strong>Host resources</strong>
               <p className="meta-row" style={{ marginTop: '6px' }}>
                 This shows system RAM/CPU (and GPU if nvidia-smi exists) on the server process host — not
                 your browser PC.
@@ -1028,9 +1030,19 @@ function App() {
               <p>Valid JSON rate: {(summary.json_valid_rate * 100).toFixed(2)}%</p>
               <p>Average latency: {summary.avg_latency_ms} ms</p>
               <p>Total elapsed time: {formatElapsedTime(summary.total_elapsed_ms)}</p>
+              {runStatus === 'canceled' ? (
+                <p className="meta-row">Run ended with cancellation; partial rows are kept above.</p>
+              ) : null}
             </div>
-          ) : !runnerLoading ? (
-            <p>No execution yet. Click "Run benchmark".</p>
+          ) : null}
+          {!summary && !runnerLoading && runStatus === 'error' ? (
+            <div className="runner-summary">
+              <strong>Error</strong>
+              <p className="error-message">{runnerResult?.lastError || 'Benchmark failed.'}</p>
+            </div>
+          ) : null}
+          {!summary && !runnerLoading && runStatus !== 'error' ? (
+            <p>No execution yet. Click &quot;Run benchmark&quot;.</p>
           ) : null}
 
           {allRows.length > 0 ? (
@@ -1048,12 +1060,16 @@ function App() {
                   {tableRows.map((row, index) => (
                     <tr
                       key={`${row.input}-${index}`}
-                      className={row.json_valid ? '' : 'row-json-invalid'}
+                      className={
+                        row.pending ? 'row-pending' : row.json_valid ? '' : 'row-json-invalid'
+                      }
                     >
                       <td>{row.input}</td>
-                      <td>{row.json_valid ? 'Yes' : 'No'}</td>
-                      <td>{row.execution_time_ms}</td>
-                      <td>{row.raw_output || row.error || '-'}</td>
+                      <td>{row.pending ? '—' : row.json_valid ? 'Yes' : 'No'}</td>
+                      <td>{row.pending ? '—' : row.execution_time_ms}</td>
+                      <td>
+                        {row.pending ? '…' : row.raw_output || row.error || '-'}
+                      </td>
                     </tr>
                   ))}
                 </tbody>
@@ -1082,7 +1098,9 @@ function App() {
 
     if (activeStage === 2) {
       const isUploadSource = metadata?.source_type === 'uploaded_csv';
-      const hasRunnerResults = (runnerResult?.results?.length ?? 0) > 0;
+      const hasRunnerResults =
+        (runnerResult?.results?.length ?? 0) > 0 &&
+        (runnerResult?.runStatus === 'completed' || runnerResult?.runStatus === 'canceled');
       const embeddedFromDataset =
         isUploadSource &&
         (metadata?.embedded_expected === true || datasetHasEmbeddedGroundTruth(dataset));

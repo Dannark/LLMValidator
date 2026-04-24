@@ -113,6 +113,46 @@ export async function runSingleExtraction(model, input) {
   return parseResponse(response);
 }
 
+export async function startRunnerBenchmark(model, cases, concurrency) {
+  const response = await fetch(`${API_BASE_URL}/runner/benchmark/start`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ model, cases, concurrency }),
+  });
+  return parseResponse(response);
+}
+
+export async function cancelRunnerBenchmark() {
+  const response = await fetch(`${API_BASE_URL}/runner/benchmark/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+  if (!contentType.includes('application/json')) {
+    throw new Error('Invalid API response (not JSON).');
+  }
+  const payload = JSON.parse(rawText);
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || 'Request failed');
+  }
+  return payload;
+}
+
+export async function getRunnerBenchmarkStatus() {
+  const response = await fetch(`${API_BASE_URL}/runner/benchmark/status`);
+  const contentType = response.headers.get('content-type') || '';
+  const rawText = await response.text();
+  if (!contentType.includes('application/json')) {
+    throw new Error('Invalid API response (not JSON).');
+  }
+  const payload = JSON.parse(rawText);
+  if (!response.ok || payload.ok === false) {
+    throw new Error(payload.error || 'Request failed');
+  }
+  return payload;
+}
+
 export async function uploadCsvDataset(file) {
   const formData = new FormData();
   formData.append('file', file);

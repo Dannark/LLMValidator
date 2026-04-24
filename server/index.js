@@ -9,7 +9,8 @@ const app = express();
 const PORT = process.env.PORT || 3001;
 
 app.use(cors());
-app.use(express.json());
+// Runner benchmark POST sends the full cases array; keep headroom for large batches.
+app.use(express.json({ limit: '25mb' }));
 
 app.get('/api/health', (_req, res) => {
   try {
