@@ -113,7 +113,7 @@ function generateMessyAddress(entry) {
 
 function buildDataset(totalEntries = DEFAULT_TOTAL_ENTRIES, locale = 'mixed') {
   if (!SUPPORTED_LOCALES.includes(locale)) {
-    throw new Error(`Locale não suportado. Opções: ${SUPPORTED_LOCALES.join(', ')}`);
+    throw new Error(`Unsupported locale. Options: ${SUPPORTED_LOCALES.join(', ')}`);
   }
 
   const dataset = [];
@@ -149,7 +149,7 @@ async function main() {
     const outputFile = await saveDataset(dataset);
     console.log(`Dataset gerado com ${dataset.length} entradas em: ${outputFile}`);
   } catch (error) {
-    console.error('Falha ao gerar dataset:', error.message);
+    console.error('Failed to generate dataset:', error.message);
     process.exitCode = 1;
   }
 }

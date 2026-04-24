@@ -6,6 +6,60 @@ function splitCsvLine(line) {
   return line.split(';').map(cleanCell);
 }
 
+/** Novo formato: input do modelo = colunas de planilha 5–12 (índices 0-based 4–11); Name…Country esperado em 20–25. */
+const VALIDATOR_V2_INPUT_SLICE_START = 4;
+const VALIDATOR_V2_INPUT_SLICE_END = 12;
+const VALIDATOR_V2_MIN_COLS = 26;
+const VALIDATOR_V2_GT_NAME_IDX = 20;
+
+function isValidatorV2HeaderLine(line) {
+  return /<\s*--\s*>/.test(line) && /name/i.test(line) && /address1/i.test(line);
+}
+
+function looksLikeValidatorV2DataRow(columns) {
+  return columns.length >= VALIDATOR_V2_MIN_COLS;
+}
+
+function extractValidatorV2Expected(columns) {
+  return {
+    name: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX]),
+    address1: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX + 1]),
+    address2: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX + 2]),
+    city: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX + 3]),
+    region: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX + 4]),
+    country: cleanCell(columns[VALIDATOR_V2_GT_NAME_IDX + 5]),
+    zip: '',
+  };
+}
+
+function buildValidatorV2InputFromRow(columns) {
+  const slice = columns.slice(
+    VALIDATOR_V2_INPUT_SLICE_START,
+    VALIDATOR_V2_INPUT_SLICE_END,
+  );
+  return slice.map(cleanCell).filter(Boolean).join(', ');
+}
+
+function resolveCsvDataLines(lines) {
+  if (lines.length === 0) {
+    return { kind: 'empty', dataLines: [] };
+  }
+  if (isValidatorV2HeaderLine(lines[0])) {
+    return { kind: 'validator_v2', dataLines: lines.slice(1) };
+  }
+  const legacyHeaderIndex = lines.findIndex((line) =>
+    line.startsWith('SHARES;1ST LINE OF NAME & ADDRESS;'),
+  );
+  if (legacyHeaderIndex >= 0) {
+    return { kind: 'legacy', dataLines: lines.slice(legacyHeaderIndex + 1) };
+  }
+  const firstCols = splitCsvLine(lines[0]);
+  if (looksLikeValidatorV2DataRow(firstCols)) {
+    return { kind: 'validator_v2', dataLines: lines };
+  }
+  return { kind: 'legacy', dataLines: lines };
+}
+
 function looksLikeAddressLine(value) {
   return /\d/.test(value) || /\b(st|street|ave|avenue|road|rd|lane|ln|blvd|drive|dr|suite|ste|unit|po box|travessa|rua|avenida)\b/i.test(value);
 }
@@ -145,13 +199,12 @@ function normalizeUploadedCsv(csvText) {
     .map((line) => line.trimEnd())
     .filter((line) => line.trim().length > 0);
 
-  const headerIndex = lines.findIndex((line) =>
-    line.startsWith('SHARES;1ST LINE OF NAME & ADDRESS;'),
-  );
-
-  // Some user-edited files may not include the original header.
-  const dataLines = headerIndex >= 0 ? lines.slice(headerIndex + 1) : lines;
+  const { kind, dataLines } = resolveCsvDataLines(lines);
   const normalizedRows = [];
+
+  if (kind === 'empty') {
+    return normalizedRows;
+  }
 
   for (const line of dataLines) {
     const columns = splitCsvLine(line);
@@ -162,6 +215,33 @@ function normalizeUploadedCsv(csvText) {
       continue;
     }
     if (/^descri/i.test(cleanCell(columns[columns.length - 1])) || /DESCRIÇÃO/i.test(line)) {
+      continue;
+    }
+
+    if (kind === 'validator_v2') {
+      if (!looksLikeValidatorV2DataRow(columns)) {
+        continue;
+      }
+      const inputColumns = columns.slice(
+        VALIDATOR_V2_INPUT_SLICE_START,
+        VALIDATOR_V2_INPUT_SLICE_END,
+      );
+      const prompt = buildValidatorV2InputFromRow(columns);
+      if (!prompt) {
+        continue;
+      }
+      const expected = extractValidatorV2Expected(columns);
+      normalizedRows.push({
+        input: prompt,
+        expected,
+        source_original: {
+          work_columns: inputColumns,
+        },
+        meta: {
+          source_type: 'uploaded_csv',
+          csv_format: 'validator_v2',
+        },
+      });
       continue;
     }
 

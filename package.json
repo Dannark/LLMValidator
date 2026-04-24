@@ -6,7 +6,9 @@
     "generate:dataset": "node dataset/generateDataset.js",
     "dev:server": "node server/index.js",
     "dev:client": "npm --prefix client run dev",
-    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\""
+    "dev": "concurrently \"npm run dev:server\" \"npm run dev:client\"",
+    "dev:ec2": "concurrently -n api,web -c blue,green \"env OLLAMA_BASE_URL=http://127.0.0.1:11434 npm run dev:server\" \"sudo npm --prefix client run dev -- --host 0.0.0.0 --port 80\"",
+    "deploy:ec2": "bash scripts/deploy-ec2.sh"
   },
   "keywords": [],
   "author": "",

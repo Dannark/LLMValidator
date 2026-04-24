@@ -13,7 +13,7 @@ router.post('/extract', async (req, res) => {
     if (!model || !input) {
       return res.status(400).json({
         ok: false,
-        error: 'model e input são obrigatórios.',
+        error: 'model and input are required.',
       });
     }
 
@@ -22,7 +22,7 @@ router.post('/extract', async (req, res) => {
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: error.message || 'Falha ao executar extração no Ollama.',
+      error: error.message || 'Failed to run extraction on Ollama.',
     });
   }
 });
@@ -35,7 +35,7 @@ router.post('/run', async (req, res) => {
   } catch (error) {
     return res.status(400).json({
       ok: false,
-      error: error.message || 'Falha ao executar benchmark.',
+      error: error.message || 'Failed to run benchmark.',
     });
   }
 });
@@ -50,7 +50,7 @@ router.get('/models', async (_req, res) => {
   } catch (error) {
     return res.status(500).json({
       ok: false,
-      error: error.message || 'Falha ao listar modelos instalados no Ollama.',
+      error: error.message || 'Failed to list models installed in Ollama.',
     });
   }
 });

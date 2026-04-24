@@ -7,15 +7,15 @@ async function parseResponse(response) {
   if (!contentType.includes('application/json')) {
     if (rawText.trim().startsWith('<!DOCTYPE') || rawText.trim().startsWith('<html')) {
       throw new Error(
-        'Resposta HTML recebida em vez de JSON. Verifique se o backend está rodando e se o proxy /api está ativo.',
+        'Received HTML instead of JSON. Is the API server running and the /api proxy enabled?',
       );
     }
-    throw new Error('Resposta inválida da API (não-JSON).');
+    throw new Error('Invalid API response (not JSON).');
   }
 
   const payload = JSON.parse(rawText);
   if (!response.ok || payload.ok === false) {
-    throw new Error(payload.error || 'Falha na requisição');
+    throw new Error(payload.error || 'Request failed');
   }
   return payload;
 }
@@ -68,6 +68,40 @@ export async function runModelBenchmark(model, cases) {
 export async function getInstalledModels() {
   const response = await fetch(`${API_BASE_URL}/runner/models`);
   return parseResponse(response);
+}
+
+async function fetchOptionalJson(url) {
+  try {
+    const response = await fetch(url);
+    const contentType = response.headers.get('content-type') || '';
+    const rawText = await response.text();
+    if (!contentType.includes('application/json')) {
+      return null;
+    }
+    const payload = JSON.parse(rawText);
+    if (!response.ok || payload.ok === false) {
+      return null;
+    }
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Host RAM/CPU/GPU (Node process machine). Tries /api/system/metrics, then /api/health (same payload after deploy).
+ */
+export async function getSystemMetrics() {
+  let data = await fetchOptionalJson(`${API_BASE_URL}/system/metrics`);
+  if (data?.memory) {
+    return data;
+  }
+  data = await fetchOptionalJson(`${API_BASE_URL}/health`);
+  if (data?.memory) {
+    const { memory, cpus, loadavg, gpus, hostname, platform, collectedAt } = data;
+    return { ok: true, memory, cpus, loadavg, gpus, hostname, platform, collectedAt };
+  }
+  return null;
 }
 
 export async function runSingleExtraction(model, input) {

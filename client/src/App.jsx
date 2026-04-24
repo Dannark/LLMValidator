@@ -6,6 +6,7 @@ import {
   getDatasetHistory,
   getLatestDataset,
   getInstalledModels,
+  getSystemMetrics,
   runSingleExtraction,
   uploadCsvDataset,
 } from './api';
@@ -49,17 +50,13 @@ function formatEta(ms) {
   return formatDurationMs(ms);
 }
 
-function computeRunnerEtaMs(results, total, completedCount) {
-  if (completedCount < 3 || total <= completedCount) {
+/** ETA from observed completion latencies (completion order). */
+function computeRunnerEtaFromLatencies(latenciesMs, total, completedCount) {
+  if (completedCount < 3 || total <= completedCount || !latenciesMs?.length) {
     return null;
   }
-  let sum = 0;
-  for (let i = 0; i < completedCount; i += 1) {
-    sum += results[i]?.execution_time_ms || 0;
-  }
-  const avgMs = sum / completedCount;
-  const remaining = total - completedCount;
-  return remaining * avgMs;
+  const avgMs = latenciesMs.reduce((a, b) => a + b, 0) / latenciesMs.length;
+  return (total - completedCount) * avgMs;
 }
 
 function normalizeValue(value) {
@@ -80,14 +77,223 @@ function isExactRowMatch(expected, parsed) {
   return EXPECTED_FIELDS.every((field) => normalizeValue(expected[field]) === normalizeValue(mapped[field]));
 }
 
-function buildEvaluationRows(results = []) {
+function getGeneratedParsedDisplay(field, parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return '';
+  }
+  if (field === 'street') {
+    return parsed.address1 ?? parsed.street ?? '';
+  }
+  if (field === 'state') {
+    return parsed.region ?? parsed.state ?? '';
+  }
+  if (field === 'postal_code') {
+    return parsed.postal ?? parsed.postal_code ?? '';
+  }
+  return parsed[field] ?? '';
+}
+
+/** Ground-truth CSV columns (expected) vs model output keys (parsed_json uses postal for zip). */
+const GROUND_TRUTH_COLUMNS = [
+  'name',
+  'address1',
+  'address2',
+  'city',
+  'region',
+  'country',
+  'zip',
+];
+
+/** True when dataset items include embedded expected columns (new CSV format), even without metadata.embedded_expected. */
+function datasetHasEmbeddedGroundTruth(dataset) {
+  if (!Array.isArray(dataset) || dataset.length === 0) {
+    return false;
+  }
+  return dataset.some((item) => {
+    const e = item?.expected;
+    if (!e || typeof e !== 'object') {
+      return false;
+    }
+    return (
+      String(e.name ?? '').trim() !== '' ||
+      String(e.address1 ?? '').trim() !== '' ||
+      String(e.city ?? '').trim() !== ''
+    );
+  });
+}
+
+function normalizeCountryToken(value) {
+  const x = normalizeValue(value);
+  if (!x) {
+    return '';
+  }
+  if (
+    x === 'usa' ||
+    x === 'us' ||
+    x === 'united states' ||
+    x === 'united states of america'
+  ) {
+    return 'us';
+  }
+  if (x === 'gbr' || x === 'gb' || x === 'uk' || x === 'united kingdom' || x === 'great britain') {
+    return 'gb';
+  }
+  return x;
+}
+
+function fieldValuesMatchGroundTruth(fieldKey, expectedVal, parsedVal) {
+  if (fieldKey === 'zip') {
+    const ev = normalizeValue(expectedVal);
+    if (!ev) {
+      return true;
+    }
+    return ev === normalizeValue(parsedVal);
+  }
+  if (fieldKey === 'country') {
+    const ev = normalizeValue(expectedVal);
+    if (!ev) {
+      return true;
+    }
+    return normalizeCountryToken(expectedVal) === normalizeCountryToken(parsedVal);
+  }
+  return normalizeValue(expectedVal) === normalizeValue(parsedVal);
+}
+
+function isGroundTruthRowMatch(expected, parsed) {
+  if (!parsed || typeof parsed !== 'object') {
+    return false;
+  }
+  const pairs = [
+    ['name', 'name'],
+    ['address1', 'address1'],
+    ['address2', 'address2'],
+    ['city', 'city'],
+    ['region', 'region'],
+    ['country', 'country'],
+    ['zip', 'postal'],
+  ];
+  return pairs.every(([expKey, parsedKey]) =>
+    fieldValuesMatchGroundTruth(expKey, expected[expKey], parsed[parsedKey]),
+  );
+}
+
+function parseCsvLine(line, delimiter) {
+  const out = [];
+  let cur = '';
+  let i = 0;
+  let inQuotes = false;
+  while (i < line.length) {
+    const c = line[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (line[i + 1] === '"') {
+          cur += '"';
+          i += 2;
+          continue;
+        }
+        inQuotes = false;
+        i += 1;
+        continue;
+      }
+      cur += c;
+      i += 1;
+    } else if (c === '"') {
+      inQuotes = true;
+      i += 1;
+    } else if (c === delimiter) {
+      out.push(cur.trim());
+      cur = '';
+      i += 1;
+    } else {
+      cur += c;
+      i += 1;
+    }
+  }
+  out.push(cur.trim());
+  return out;
+}
+
+function detectCsvDelimiter(line) {
+  const semi = (line.match(/;/g) || []).length;
+  const comma = (line.match(/,/g) || []).length;
+  return semi > comma ? ';' : ',';
+}
+
+function normalizeCsvHeader(cell) {
+  return `${cell ?? ''}`
+    .replace(/^\uFEFF/, '')
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, '_');
+}
+
+/** Map header label -> canonical key (name, address1, … zip). */
+function mapGroundTruthHeader(headerCells) {
+  const aliases = {
+    name: ['name', 'customer_name', 'full_name', 'issuer_name'],
+    address1: ['address1', 'address_1', 'addr1', 'street', 'line1'],
+    address2: ['address2', 'address_2', 'addr2', 'line2'],
+    city: ['city'],
+    region: ['region', 'state', 'province'],
+    country: ['country'],
+    zip: ['zip', 'postal', 'postal_code', 'postcode', 'zipcode'],
+  };
+  const colIndex = {};
+  const normalized = headerCells.map(normalizeCsvHeader);
+  for (const canonical of GROUND_TRUTH_COLUMNS) {
+    const idx = normalized.findIndex((h) => aliases[canonical].includes(h));
+    if (idx >= 0) {
+      colIndex[canonical] = idx;
+    }
+  }
+  return colIndex;
+}
+
+function parseGroundTruthCsv(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length < 2) {
+    return { rows: [], error: 'CSV must include a header row and at least one data row.' };
+  }
+  const delim = detectCsvDelimiter(lines[0]);
+  const headerCells = parseCsvLine(lines[0], delim);
+  const colIndex = mapGroundTruthHeader(headerCells);
+  const missing = GROUND_TRUTH_COLUMNS.filter((k) => colIndex[k] === undefined);
+  if (missing.length > 0) {
+    return {
+      rows: [],
+      error: `Missing column(s): ${missing.join(', ')}. Found headers: ${headerCells.join(', ')}`,
+    };
+  }
+  const rows = [];
+  for (let li = 1; li < lines.length; li += 1) {
+    const cells = parseCsvLine(lines[li], delim);
+    const row = {};
+    for (const k of GROUND_TRUTH_COLUMNS) {
+      const idx = colIndex[k];
+      row[k] = cells[idx] != null ? `${cells[idx]}`.trim() : '';
+    }
+    rows.push(row);
+  }
+  return { rows, error: null };
+}
+
+function buildEvaluationRows(results = [], groundTruthRows = null) {
   return results.map((row, index) => {
-    const exactMatch = row.json_valid && isExactRowMatch(row.expected, row.parsed_json);
+    const expected =
+      groundTruthRows != null ? groundTruthRows[index] || {} : row.expected || {};
+    const exactMatch =
+      row.json_valid &&
+      (groundTruthRows != null
+        ? isGroundTruthRowMatch(expected, row.parsed_json)
+        : isExactRowMatch(expected, row.parsed_json));
     return {
       id: `${index}-${row.input}`,
       index: index + 1,
       input: row.input,
-      expected: row.expected || {},
+      expected,
       parsed_json: row.parsed_json,
       raw_output: row.raw_output,
       json_valid: row.json_valid,
@@ -122,7 +328,11 @@ function App() {
   const [availableModels, setAvailableModels] = useState([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [runnerLimit, setRunnerLimit] = useState(20);
+  const [runnerConcurrency, setRunnerConcurrency] = useState(2);
   const [runnerLoading, setRunnerLoading] = useState(false);
+  const [runnerServerMetrics, setRunnerServerMetrics] = useState(null);
+  /** idle | loading | ok | empty — host metrics poll status while benchmark runs */
+  const [runnerHostMetricsStatus, setRunnerHostMetricsStatus] = useState('idle');
   const [runnerCancelRequested, setRunnerCancelRequested] = useState(false);
   const [runnerResult, setRunnerResult] = useState(null);
   const [evaluationRows, setEvaluationRows] = useState([]);
@@ -134,12 +344,19 @@ function App() {
     etaMs: null,
     notice: '',
     startedAt: null,
+    inFlight: 0,
+    concurrency: 1,
   });
   const [runnerElapsedTick, setRunnerElapsedTick] = useState(0);
   const [runnerShowFullTable, setRunnerShowFullTable] = useState(false);
+  const [evaluatorGroundTruthRows, setEvaluatorGroundTruthRows] = useState(null);
+  const [evaluatorGroundTruthFileName, setEvaluatorGroundTruthFileName] = useState('');
+  const [evaluatorGroundTruthError, setEvaluatorGroundTruthError] = useState('');
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const runnerCancelRef = useRef(false);
+  const groundTruthFileInputRef = useRef(null);
+  const runnerMetricsPollRef = useRef(null);
 
   useEffect(() => {
     if (!runnerLoading) {
@@ -149,6 +366,33 @@ function App() {
       setRunnerElapsedTick((n) => n + 1);
     }, 1000);
     return () => clearInterval(id);
+  }, [runnerLoading]);
+
+  useEffect(() => {
+    if (!runnerLoading) {
+      if (runnerMetricsPollRef.current) {
+        clearInterval(runnerMetricsPollRef.current);
+        runnerMetricsPollRef.current = null;
+      }
+      setRunnerServerMetrics(null);
+      setRunnerHostMetricsStatus('idle');
+      return undefined;
+    }
+
+    setRunnerHostMetricsStatus('loading');
+    async function poll() {
+      const data = await getSystemMetrics();
+      setRunnerServerMetrics(data);
+      setRunnerHostMetricsStatus(data?.memory ? 'ok' : 'empty');
+    }
+    poll();
+    runnerMetricsPollRef.current = setInterval(poll, 1500);
+    return () => {
+      if (runnerMetricsPollRef.current) {
+        clearInterval(runnerMetricsPollRef.current);
+        runnerMetricsPollRef.current = null;
+      }
+    };
   }, [runnerLoading]);
 
   useEffect(() => {
@@ -167,7 +411,7 @@ function App() {
           setHistory(historyResponse.value.items || []);
         }
       } catch {
-        // Ignora falhas no carregamento inicial.
+        // Ignore bootstrap failures.
       }
     }
     bootstrap();
@@ -175,9 +419,22 @@ function App() {
 
   useEffect(() => {
     const results = runnerResult?.results || [];
-    setEvaluationRows(buildEvaluationRows(results));
+    const useSeparateGroundTruthFile =
+      metadata?.source_type === 'uploaded_csv' &&
+      Array.isArray(evaluatorGroundTruthRows) &&
+      evaluatorGroundTruthRows.length > 0;
+    const gt = useSeparateGroundTruthFile ? evaluatorGroundTruthRows : null;
+    setEvaluationRows(buildEvaluationRows(results, gt));
     setEvaluationIndex(0);
-  }, [runnerResult]);
+  }, [runnerResult, evaluatorGroundTruthRows, metadata?.source_type]);
+
+  useEffect(() => {
+    if (metadata?.source_type !== 'uploaded_csv') {
+      setEvaluatorGroundTruthRows(null);
+      setEvaluatorGroundTruthFileName('');
+      setEvaluatorGroundTruthError('');
+    }
+  }, [metadata?.source_type]);
 
   useEffect(() => {
     async function loadModels() {
@@ -195,7 +452,7 @@ function App() {
           });
         }
       } catch {
-        // Se falhar, mantém campo atual para permitir valor manual futuro.
+        // On failure, keep current model field for manual entry.
       } finally {
         setModelsLoading(false);
       }
@@ -334,46 +591,105 @@ function App() {
         throw new Error('Load or generate a dataset before running the benchmark.');
       }
 
+      const total = limitedCases.length;
+      const rawConc = Number(runnerConcurrency);
+      const concurrency = Math.min(
+        64,
+        Math.max(1, Number.isFinite(rawConc) && rawConc > 0 ? Math.floor(rawConc) : 1),
+      );
+
       const startedAt = Date.now();
-      const results = [];
+      const results = new Array(total);
+      const latencies = [];
+      let nextIdx = 0;
+      let inFlight = 0;
+      let completed = 0;
+
+      function takeNext() {
+        if (runnerCancelRef.current) {
+          return -1;
+        }
+        if (nextIdx >= total) {
+          return -2;
+        }
+        const idx = nextIdx;
+        nextIdx += 1;
+        return idx;
+      }
+
+      function pushProgress(notice = '') {
+        setRunnerProgress({
+          processed: completed,
+          total,
+          currentItem: Math.min(completed + inFlight, total),
+          etaMs: computeRunnerEtaFromLatencies(latencies, total, completed),
+          notice,
+          startedAt,
+          inFlight,
+          concurrency,
+        });
+      }
+
       setRunnerProgress({
         processed: 0,
-        total: limitedCases.length,
-        currentItem: 1,
+        total,
+        currentItem: Math.min(concurrency, total),
         etaMs: null,
         notice: '',
         startedAt,
+        inFlight: 0,
+        concurrency,
       });
 
-      for (let index = 0; index < limitedCases.length; index += 1) {
-        if (runnerCancelRef.current) {
-          break;
+      async function worker() {
+        while (true) {
+          const index = takeNext();
+          if (index === -1 || index === -2) {
+            return;
+          }
+          inFlight += 1;
+          pushProgress();
+          const item = limitedCases[index];
+          try {
+            const response = await runSingleExtraction(runnerModel, item.input);
+            results[index] = {
+              input: item.input,
+              expected: item.expected ?? null,
+              source_original: item.source_original ?? null,
+              raw_output: response.raw_output,
+              parsed_json: response.parsed_json,
+              execution_time_ms: response.execution_time_ms,
+              json_valid: response.json_valid,
+              error: null,
+            };
+            latencies.push(response.execution_time_ms || 0);
+          } catch (err) {
+            results[index] = {
+              input: item.input,
+              expected: item.expected ?? null,
+              source_original: item.source_original ?? null,
+              raw_output: '',
+              parsed_json: null,
+              execution_time_ms: 0,
+              json_valid: false,
+              error: err.message || 'Execution failed.',
+            };
+            latencies.push(0);
+          } finally {
+            inFlight -= 1;
+            completed += 1;
+            pushProgress();
+          }
         }
+      }
 
-        const item = limitedCases[index];
-        setRunnerProgress({
-          processed: index,
-          total: limitedCases.length,
-          currentItem: index + 1,
-          etaMs: computeRunnerEtaMs(results, limitedCases.length, index),
-          notice: '',
-          startedAt,
-        });
+      const workers = Math.min(concurrency, total);
+      await Promise.all(Array.from({ length: workers }, () => worker()));
 
-        try {
-          const response = await runSingleExtraction(runnerModel, item.input);
-          results.push({
-            input: item.input,
-            expected: item.expected ?? null,
-            source_original: item.source_original ?? null,
-            raw_output: response.raw_output,
-            parsed_json: response.parsed_json,
-            execution_time_ms: response.execution_time_ms,
-            json_valid: response.json_valid,
-            error: null,
-          });
-        } catch (err) {
-          results.push({
+      for (let i = 0; i < total; i += 1) {
+        if (results[i] === undefined) {
+          const item = limitedCases[i];
+          results[i] = {
             input: item.input,
             expected: item.expected ?? null,
             source_original: item.source_original ?? null,
@@ -381,8 +697,8 @@ function App() {
             parsed_json: null,
             execution_time_ms: 0,
             json_valid: false,
-            error: err.message || 'Execution failed.',
-          });
+            error: runnerCancelRef.current ? 'Canceled.' : 'Skipped.',
+          };
         }
       }
 
@@ -397,11 +713,13 @@ function App() {
 
       setRunnerProgress({
         processed,
-        total: limitedCases.length,
-        currentItem: limitedCases.length,
+        total,
+        currentItem: total,
         etaMs: null,
         notice: runnerCancelRef.current ? 'Execution canceled by user.' : 'Execution completed.',
         startedAt,
+        inFlight: 0,
+        concurrency,
       });
       setRunnerResult({
         model: runnerModel,
@@ -411,6 +729,7 @@ function App() {
           json_valid_rate: processed ? validCount / processed : 0,
           avg_latency_ms: avgLatencyMs,
           total_elapsed_ms: totalElapsedMs,
+          concurrency,
         },
         results,
       });
@@ -438,6 +757,42 @@ function App() {
       ...current,
       notice: 'Cancel requested. Finishing current request...',
     }));
+  }
+
+  function handleGroundTruthFileChange(event) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : '';
+      const { rows, error: parseError } = parseGroundTruthCsv(text);
+      if (parseError) {
+        setEvaluatorGroundTruthError(parseError);
+        setEvaluatorGroundTruthRows(null);
+        setEvaluatorGroundTruthFileName('');
+        return;
+      }
+      setEvaluatorGroundTruthRows(rows);
+      setEvaluatorGroundTruthFileName(file.name);
+      setEvaluatorGroundTruthError('');
+    };
+    reader.onerror = () => {
+      setEvaluatorGroundTruthError('Failed to read file.');
+      setEvaluatorGroundTruthRows(null);
+      setEvaluatorGroundTruthFileName('');
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+
+  function handleClearGroundTruthFile() {
+    setEvaluatorGroundTruthRows(null);
+    setEvaluatorGroundTruthFileName('');
+    setEvaluatorGroundTruthError('');
+    if (groundTruthFileInputRef.current) {
+      groundTruthFileInputRef.current.value = '';
+    }
   }
 
   function handleExportRunnerCsv() {
@@ -546,6 +901,17 @@ function App() {
               value={runnerLimit}
               onChange={(event) => setRunnerLimit(event.target.value)}
             />
+            <label htmlFor="runner-concurrency">Parallel requests</label>
+            <input
+              id="runner-concurrency"
+              type="number"
+              min="1"
+              max="64"
+              title="Concurrent Ollama API calls (tune for VRAM / GPU)"
+              value={runnerConcurrency}
+              onChange={(event) => setRunnerConcurrency(event.target.value)}
+              disabled={runnerLoading}
+            />
             <button type="button" onClick={handleRunBenchmark} disabled={runnerLoading}>
               {runnerLoading ? 'Running...' : 'Run benchmark'}
             </button>
@@ -573,13 +939,69 @@ function App() {
             <span>Loaded dataset: {dataset.length} items</span>
             <span>Selected model: {runnerModel}</span>
             <span>Current limit: {runnerLimit}</span>
+            <span>Parallelism: {runnerConcurrency}</span>
           </div>
+
+          {runnerLoading ? (
+            <div className="runner-summary">
+              <strong>Host resources (same machine as the Node API)</strong>
+              <p className="meta-row" style={{ marginTop: '6px' }}>
+                This shows system RAM/CPU (and GPU if nvidia-smi exists) on the server process host — not
+                your browser PC.
+              </p>
+              {runnerHostMetricsStatus === 'loading' && !runnerServerMetrics?.memory ? (
+                <p>Fetching RAM and GPU stats…</p>
+              ) : null}
+              {runnerHostMetricsStatus === 'empty' ? (
+                <p className="error-message">
+                  Host metrics unavailable. Deploy the backend with{' '}
+                  <code style={{ fontSize: '0.95em' }}>GET /api/system/metrics</code> and ensure requests
+                  to <code style={{ fontSize: '0.95em' }}>/api</code> reach Node (Vite proxy or reverse
+                  proxy).
+                </p>
+              ) : null}
+              {runnerServerMetrics?.memory ? (
+                <div
+                  className="meta-row"
+                  style={{ marginTop: '8px', flexDirection: 'column', alignItems: 'flex-start' }}
+                >
+                  <span>
+                    <strong>System RAM</strong> — total: {runnerServerMetrics.memory.totalMb} MiB · used:{' '}
+                    {runnerServerMetrics.memory.usedMb} MiB · available:{' '}
+                    {runnerServerMetrics.memory.freeMb} MiB ({runnerServerMetrics.memory.usagePercent}% used)
+                  </span>
+                  {runnerServerMetrics.gpus?.length ? (
+                    <span style={{ marginTop: '6px' }}>
+                      <strong>GPU</strong>:{' '}
+                      {runnerServerMetrics.gpus
+                        .map(
+                          (g) =>
+                            `${g.name}: ${g.usedMb ?? '?'} / ${g.totalMb ?? '?'} MiB VRAM${
+                              g.usagePercent != null ? ` (${g.usagePercent}% of VRAM)` : ''
+                            }`,
+                        )
+                        .join(' · ')}
+                    </span>
+                  ) : (
+                    <span style={{ marginTop: '6px' }}>
+                      <strong>GPU</strong>: nvidia-smi not found (OK on Mac / CPU-only hosts)
+                    </span>
+                  )}
+                  <span style={{ marginTop: '6px' }}>
+                    <strong>CPU</strong>: {runnerServerMetrics.cpus} cores · load average (1m):{' '}
+                    {runnerServerMetrics.loadavg?.['1m'] ?? '—'}
+                  </span>
+                </div>
+              ) : null}
+            </div>
+          ) : null}
 
           {runnerLoading ? (
             <div className="runner-summary">
               <strong>Progress</strong>
               <p>
-                Item {runnerProgress.currentItem} of {runnerProgress.total} ({progressPercent}%)
+                Done {runnerProgress.processed} / {runnerProgress.total} ({progressPercent}%) · in flight:{' '}
+                {runnerProgress.inFlight ?? 0} · cap: {runnerProgress.concurrency ?? 1} concurrent
               </p>
               <p>
                 Elapsed: {formatElapsedTime(runnerElapsedMs)}
@@ -599,6 +1021,9 @@ function App() {
             <div className="runner-summary">
               <strong>Summary</strong>
               <p>Processed: {summary.processed}</p>
+              {summary.concurrency != null ? (
+                <p>Parallelism used: {summary.concurrency}</p>
+              ) : null}
               <p>Valid JSON: {summary.json_valid_count}</p>
               <p>Valid JSON rate: {(summary.json_valid_rate * 100).toFixed(2)}%</p>
               <p>Average latency: {summary.avg_latency_ms} ms</p>
@@ -656,17 +1081,74 @@ function App() {
     }
 
     if (activeStage === 2) {
-      if (metadata?.source_type === 'uploaded_csv') {
+      const isUploadSource = metadata?.source_type === 'uploaded_csv';
+      const hasRunnerResults = (runnerResult?.results?.length ?? 0) > 0;
+      const embeddedFromDataset =
+        isUploadSource &&
+        (metadata?.embedded_expected === true || datasetHasEmbeddedGroundTruth(dataset));
+      const hasSeparateGroundTruthFile =
+        Array.isArray(evaluatorGroundTruthRows) && evaluatorGroundTruthRows.length > 0;
+      const hasGroundTruth = embeddedFromDataset || hasSeparateGroundTruthFile;
+
+      if (isUploadSource && !hasGroundTruth) {
         return (
           <section className="dataset-card">
             <h2>Evaluator</h2>
             <p>
-              Evaluator is currently disabled for uploaded CSV datasets because there is no
-              ground-truth expected output to compare automatically.
+              Upload on Dataset a CSV with <strong>17 input columns</strong> plus the expected block{' '}
+              <strong>Name…Country</strong> (ground truth in the same file). Or load a CSV with only{' '}
+              <strong>name, address1, address2, city, region, country, zip</strong> below.
             </p>
             <p>
-              Use Runner and export the normalized LLM output CSV for now.
+              Row order must match the Runner (first data row = first record).
             </p>
+            <div className="controls-row">
+              <label htmlFor="ground-truth-csv">
+                Ground truth CSV (optional — only if the Dataset has no embedded expected columns)
+              </label>
+              <input
+                id="ground-truth-csv"
+                ref={groundTruthFileInputRef}
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleGroundTruthFileChange}
+              />
+            </div>
+            {evaluatorGroundTruthError ? (
+              <p className="error-message">{evaluatorGroundTruthError}</p>
+            ) : null}
+            <p className="meta-row">
+              After loading the Dataset (and running the Runner if needed), use this tab to compare field
+              by field.
+            </p>
+          </section>
+        );
+      }
+
+      if (isUploadSource && hasGroundTruth && !hasRunnerResults) {
+        return (
+          <section className="dataset-card">
+            <h2>Evaluator</h2>
+            {embeddedFromDataset && !hasSeparateGroundTruthFile ? (
+              <p>
+                Ground truth: <strong>expected columns from the same CSV</strong> as on Dataset (
+                {dataset.length} rows).
+              </p>
+            ) : (
+              <>
+                <p>
+                  Ground truth loaded from file: <strong>{evaluatorGroundTruthFileName}</strong> (
+                  {evaluatorGroundTruthRows.length} rows).
+                </p>
+                <button type="button" className="secondary" onClick={handleClearGroundTruthFile}>
+                  Remove ground truth file
+                </button>
+              </>
+            )}
+            {evaluatorGroundTruthError ? (
+              <p className="error-message">{evaluatorGroundTruthError}</p>
+            ) : null}
+            <p>Run the benchmark on the Runner tab first; evaluation needs model output.</p>
           </section>
         );
       }
@@ -683,6 +1165,25 @@ function App() {
       const finalRejectedCount = totalRows - finalApprovedCount;
       const finalApprovalRate = totalRows ? ((finalApprovedCount / totalRows) * 100).toFixed(2) : '0.00';
 
+      const embeddedFromDatasetForGt =
+        isUploadSource &&
+        (metadata?.embedded_expected === true || datasetHasEmbeddedGroundTruth(dataset));
+      const hasGroundTruthRows =
+        embeddedFromDatasetForGt ||
+        (Array.isArray(evaluatorGroundTruthRows) && evaluatorGroundTruthRows.length > 0);
+      const gtRowCount =
+        evaluatorGroundTruthRows?.length > 0
+          ? evaluatorGroundTruthRows.length
+          : embeddedFromDatasetForGt
+            ? dataset.length
+            : 0;
+      const runnerRowCount = runnerResult?.results?.length ?? 0;
+      const groundTruthRowMismatch =
+        metadata?.source_type === 'uploaded_csv' &&
+        hasGroundTruthRows &&
+        runnerRowCount > 0 &&
+        gtRowCount !== runnerRowCount;
+
       function setManualDecision(decision) {
         if (!currentRow) {
           return;
@@ -695,6 +1196,50 @@ function App() {
       return (
         <section className="dataset-card">
           <h2>Evaluator</h2>
+          {metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows ? (
+            <div style={{ marginBottom: '12px' }}>
+              {embeddedFromDatasetForGt && !evaluatorGroundTruthFileName ? (
+                <p className="meta-row">
+                  Comparing to expected values from the <strong>same CSV</strong> loaded on Dataset (
+                  {dataset.length} rows).
+                </p>
+              ) : null}
+              <div className="controls-row" style={{ flexWrap: 'wrap' }}>
+                <label htmlFor="ground-truth-csv-replace">
+                  {embeddedFromDatasetForGt
+                    ? 'Replace expected values with another CSV (optional)'
+                    : 'Replace ground truth CSV'}
+                </label>
+                <input
+                  id="ground-truth-csv-replace"
+                  ref={groundTruthFileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  onChange={handleGroundTruthFileChange}
+                />
+                {evaluatorGroundTruthFileName ? (
+                  <>
+                    <span className="meta-row">
+                      {evaluatorGroundTruthFileName} ({evaluatorGroundTruthRows?.length ?? 0} rows)
+                    </span>
+                    <button type="button" className="secondary" onClick={handleClearGroundTruthFile}>
+                      Clear file
+                    </button>
+                  </>
+                ) : null}
+              </div>
+            </div>
+          ) : null}
+          {groundTruthRowMismatch ? (
+            <p className="error-message">
+              Ground truth has {gtRowCount} data rows but Runner output has {runnerRowCount}. Expected
+              values are applied by row index; extra runner rows have empty expected fields until the
+              CSV row count matches.
+            </p>
+          ) : null}
+          {evaluatorGroundTruthError ? (
+            <p className="error-message">{evaluatorGroundTruthError}</p>
+          ) : null}
           <div className="meta-row">
             <span>Total rows: {totalRows}</span>
             <span>Auto approved: {autoApprovedCount}</span>
@@ -737,10 +1282,21 @@ function App() {
                     </tr>
                   </thead>
                   <tbody>
-                    {EXPECTED_FIELDS.map((field) => {
+                    {(metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows
+                      ? GROUND_TRUTH_COLUMNS
+                      : EXPECTED_FIELDS
+                    ).map((field) => {
                       const expectedValue = currentRow.expected?.[field] ?? '';
-                      const outputValue = currentRow.parsed_json?.[field] ?? '';
-                      const match = normalizeValue(expectedValue) === normalizeValue(outputValue);
+                      const outputValue =
+                        metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows
+                          ? field === 'zip'
+                            ? currentRow.parsed_json?.postal ?? ''
+                            : currentRow.parsed_json?.[field] ?? ''
+                          : getGeneratedParsedDisplay(field, currentRow.parsed_json);
+                      const match =
+                        metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows
+                          ? fieldValuesMatchGroundTruth(field, expectedValue, outputValue)
+                          : normalizeValue(expectedValue) === normalizeValue(outputValue);
                       return (
                         <tr key={field} className={match ? '' : 'row-json-invalid'}>
                           <td>{field}</td>
