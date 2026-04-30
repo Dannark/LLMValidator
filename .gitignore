@@ -1,3 +1,6 @@
+# secrets — nunca commitar chaves
+*.pem
+
 # macOS / editor
 .DS_Store
 .idea/
@@ -25,6 +28,7 @@ yarn-error.log*
 
 # benchmark/generated artifacts
 data/datasets/
+data/runner-benchmark/
 dataset/addresses.dataset.json
 results/
 reports/

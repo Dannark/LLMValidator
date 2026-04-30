@@ -1,5 +1,28 @@
-const OLLAMA_URL = 'http://localhost:11434/api/generate';
-const OLLAMA_TAGS_URL = 'http://localhost:11434/api/tags';
+const OLLAMA_BASE = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').replace(
+  /\/$/,
+  '',
+);
+const OLLAMA_URL = `${OLLAMA_BASE}/api/generate`;
+const OLLAMA_TAGS_URL = `${OLLAMA_BASE}/api/tags`;
+
+/**
+ * Max context tokens per /api/generate request (KV RAM scales with this).
+ * Keep low for ~24–30 GiB hosts; extraction prompts here are short.
+ * Override: OLLAMA_NUM_CTX. Also set OLLAMA_CONTEXT_LENGTH on `ollama serve` so CLI/other clients match.
+ */
+const DEFAULT_NUM_CTX = 4096;
+
+function resolveNumCtx() {
+  const raw = process.env.OLLAMA_NUM_CTX;
+  if (raw == null || `${raw}`.trim() === '') {
+    return DEFAULT_NUM_CTX;
+  }
+  const n = Number.parseInt(String(raw), 10);
+  if (!Number.isFinite(n) || n < 256) {
+    return DEFAULT_NUM_CTX;
+  }
+  return Math.min(n, 262144);
+}
 
 function buildPrompt(inputText) {
   return [
@@ -8,14 +31,18 @@ function buildPrompt(inputText) {
     'Do not include markdown, explanations, or extra keys.',
     'Required keys: name, address1, address2, city, region, postal, country.',
     'Use empty string when a field is unknown.',
-    'Country rules:',
-    '- If the input explicitly mentions a country (e.g. "UNITED STATES", "CANADA", "BRAZIL", "ISRAEL"), use that country.',
-    '- Do NOT output 2-letter country codes (e.g. "US", "BR"). Prefer full English country names.',
+    'Name rules:',
+    '- The name field acts as an identifier / primary key (e.g. "Company X, person name").',
+    '- Copy the name from the input EXACTLY as given: same wording, punctuation, commas, and order. Do not rephrase, normalize, fix spelling, or merge with address lines.',
+    'Region and country rules:',
+    '- Never abbreviate region or country. Use full region names (e.g. full state or province name, not a 2-letter code) and full English country names.',
+    '- If the input explicitly mentions a country (e.g. "UNITED STATES", "CANADA", "BRAZIL", "ISRAEL"), use that country in full form.',
+    '- Do NOT output 2-letter country codes (e.g. "US", "BR").',
     '- If the input does NOT explicitly mention a country, leave country as an empty string.',
     'Address rules:',
     '- Put the main street/number (and PO Box) in address1.',
     '- Put unit/suite/apartment/building/floor and other complements in address2.',
-    '- Put ONLY the customer/entity name in name. Do NOT repeat the address inside name.',
+    '- Put ONLY the customer/entity name in name. Do NOT duplicate address text inside name.',
     '- If uncertain, preserve tokens from input instead of inventing or normalizing.',
     '- Do NOT drop meaningful address fragments; keep overflow/complements in address2.',
     'Output format:',
@@ -90,6 +117,9 @@ async function runOllamaExtraction({ model, input }) {
       model,
       prompt: buildPrompt(input),
       stream: false,
+      options: {
+        num_ctx: resolveNumCtx(),
+      },
     }),
   });
 
@@ -97,7 +127,7 @@ async function runOllamaExtraction({ model, input }) {
 
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Falha no Ollama (${response.status}): ${text}`);
+    throw new Error(`Ollama request failed (${response.status}): ${text}`);
   }
 
   const data = await response.json();
@@ -116,7 +146,7 @@ async function listInstalledOllamaModels() {
   const response = await fetch(OLLAMA_TAGS_URL);
   if (!response.ok) {
     const text = await response.text();
-    throw new Error(`Falha ao listar modelos do Ollama (${response.status}): ${text}`);
+    throw new Error(`Failed to list Ollama models (${response.status}): ${text}`);
   }
 
   const data = await response.json();

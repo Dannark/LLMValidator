@@ -67,11 +67,11 @@ async function runSingleCase({ model, input, expected = null }) {
 
 async function runBatchCases({ model, cases }) {
   if (!model || typeof model !== 'string') {
-    throw new Error('model é obrigatório.');
+    throw new Error('model is required.');
   }
 
   if (!Array.isArray(cases) || cases.length === 0) {
-    throw new Error('cases deve ser um array não vazio.');
+    throw new Error('cases must be a non-empty array.');
   }
 
   const results = [];
@@ -85,7 +85,7 @@ async function runBatchCases({ model, cases }) {
         parsed_json: null,
         execution_time_ms: 0,
         json_valid: false,
-        error: 'Input vazio.',
+        error: 'Empty input.',
       });
       continue;
     }

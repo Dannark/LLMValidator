@@ -86,12 +86,12 @@ async function readDatasetHistory() {
 
 function normalizeDatasetFileName(fileName) {
   if (typeof fileName !== 'string') {
-    throw new Error('Nome de arquivo inválido.');
+    throw new Error('Invalid file name.');
   }
 
   const sanitized = path.basename(fileName);
   if (sanitized !== fileName || !DATASET_FILE_REGEX.test(sanitized)) {
-    throw new Error('Nome de arquivo inválido.');
+    throw new Error('Invalid file name.');
   }
 
   return sanitized;

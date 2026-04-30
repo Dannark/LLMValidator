@@ -28,10 +28,10 @@ const MAX_DATASET_SIZE = 5000;
 
 function validateDatasetSize(size) {
   if (!Number.isInteger(size)) {
-    throw new Error('size deve ser um inteiro.');
+    throw new Error('size must be an integer.');
   }
   if (size < MIN_DATASET_SIZE || size > MAX_DATASET_SIZE) {
-    throw new Error(`size deve estar entre ${MIN_DATASET_SIZE} e ${MAX_DATASET_SIZE}.`);
+    throw new Error(`size must be between ${MIN_DATASET_SIZE} and ${MAX_DATASET_SIZE}.`);
   }
 }
 
@@ -85,12 +85,15 @@ async function createDatasetFromUploadedCsv(csvContent, originalFileName = 'uplo
     throw new Error('Uploaded CSV did not produce usable rows.');
   }
 
+  const embeddedExpected = items.some((item) => item.expected && typeof item.expected === 'object');
+
   const metadata = {
     generatedAt: new Date().toISOString(),
     size: items.length,
     locale: 'uploaded',
     source_type: 'uploaded_csv',
     original_file_name: originalFileName,
+    embedded_expected: embeddedExpected,
   };
 
   const { filePath, latestFilePath } = await saveDataset(items, metadata);

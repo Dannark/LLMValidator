@@ -47,7 +47,7 @@ router.get('/latest', async (_req, res) => {
   } catch (error) {
     res.status(404).json({
       ok: false,
-      error: 'Nenhum dataset gerado ainda.',
+      error: 'No dataset generated yet.',
     });
   }
 });
@@ -62,7 +62,7 @@ router.get('/history', async (_req, res) => {
   } catch (error) {
     res.status(500).json({
       ok: false,
-      error: 'Falha ao carregar histórico de datasets.',
+      error: 'Failed to load dataset history.',
     });
   }
 });
@@ -78,7 +78,7 @@ router.get('/:fileName', async (req, res) => {
   } catch (error) {
     res.status(404).json({
       ok: false,
-      error: error.message || 'Dataset não encontrado.',
+      error: error.message || 'Dataset not found.',
     });
   }
 });
@@ -94,7 +94,7 @@ router.delete('/:fileName', async (req, res) => {
   } catch (error) {
     res.status(400).json({
       ok: false,
-      error: error.message || 'Falha ao excluir dataset.',
+      error: error.message || 'Failed to delete dataset.',
     });
   }
 });
