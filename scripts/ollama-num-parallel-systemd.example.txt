@@ -1,3 +1,44 @@
+# Ollama on small RAM/VRAM hosts (fixes "requires X GiB" / EOF on huge default context)
+#
+# Models like gemma3 advertise 131k context; Ollama may plan KV for that and demand
+# hundreds of GiB unless you cap context at the daemon AND send num_ctx from apps.
+#
+# === systemd drop-in MUST be valid or it is IGNORED ===
+#
+#   - The FIRST non-comment line in the drop-in MUST be: [Service]
+#     If you only paste Environment=... lines (no [Service]), NOTHING applies — you will
+#     still see OLLAMA_NUM_PARALLEL=192 from the main unit or another fragment.
+#   - Do NOT use semicolons between variables. Wrong:
+#       Environment="OLLAMA_NUM_PARALLEL=20;OLLAMA_CONTEXT_LENGTH=4096"
+#   - Correct minimal override (adjust parallel 4–8 for your GPU):
+#
+#       [Service]
+#       Environment="OLLAMA_NUM_PARALLEL=8"
+#       Environment="OLLAMA_CONTEXT_LENGTH=4096"
+#
+# If `systemctl show ollama --property=Environment` still shows OLLAMA_NUM_PARALLEL=192,
+# your override did not apply — fix syntax, then:
+#   sudo systemctl daemon-reload && sudo systemctl restart ollama
+#
+# See EVERY fragment that sets env (192 often comes from an old drop-in or vendor unit):
+#   systemctl cat ollama
+#
+# 1) Cap default context for ALL clients (ollama run, curl, etc.):
+#
+#   sudo systemctl edit ollama
+#
+#   [Service]
+#   Environment="OLLAMA_CONTEXT_LENGTH=4096"
+#
+#   sudo systemctl daemon-reload && sudo systemctl restart ollama
+#
+# Raise slowly (8192, 16384) only if `nvidia-smi` + `ollama ps` stay healthy.
+#
+# 2) This repo's Node runner also sends options.num_ctx (default 4096, env OLLAMA_NUM_CTX).
+#    Restart your Node process after changing OLLAMA_NUM_CTX.
+#
+# --- (below) OLLAMA_NUM_PARALLEL ---
+#
 # Increase OLLAMA_NUM_PARALLEL on the Ollama host (Linux + systemd)
 #
 # Ollama limits how many requests per model run truly in parallel. The app can

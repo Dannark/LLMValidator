@@ -468,7 +468,9 @@ function App() {
         const rows = mergeRunnerRowsFromStatus(s);
         const isTerminal = s.status === 'completed' || s.status === 'canceled' || s.status === 'error';
         setRunnerLoading(s.status === 'running');
-        if (s.model) {
+        // Only mirror the server model while a run is active; after complete/canceled/error the user
+        // must be able to pick the next model without the poll reverting the dropdown.
+        if (s.status === 'running' && s.model) {
           setRunnerModel(s.model);
         }
 
