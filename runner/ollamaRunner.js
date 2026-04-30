@@ -5,24 +5,19 @@ const OLLAMA_BASE = (process.env.OLLAMA_BASE_URL || 'http://127.0.0.1:11434').re
 const OLLAMA_URL = `${OLLAMA_BASE}/api/generate`;
 const OLLAMA_TAGS_URL = `${OLLAMA_BASE}/api/tags`;
 
-/**
- * Max context tokens per /api/generate request (KV RAM scales with this).
- * Keep low for ~24–30 GiB hosts; extraction prompts here are short.
- * Override: OLLAMA_NUM_CTX. Also set OLLAMA_CONTEXT_LENGTH on `ollama serve` so CLI/other clients match.
- */
-const DEFAULT_NUM_CTX = 4096;
-
-function resolveNumCtx() {
-  const raw = process.env.OLLAMA_NUM_CTX;
-  if (raw == null || `${raw}`.trim() === '') {
-    return DEFAULT_NUM_CTX;
-  }
-  const n = Number.parseInt(String(raw), 10);
-  if (!Number.isFinite(n) || n < 256) {
-    return DEFAULT_NUM_CTX;
-  }
-  return Math.min(n, 262144);
-}
+// Optional: cap context per request (can interact badly with some models/hosts).
+// const DEFAULT_NUM_CTX = 4096;
+// function resolveNumCtx() {
+//   const raw = process.env.OLLAMA_NUM_CTX;
+//   if (raw == null || `${raw}`.trim() === '') {
+//     return DEFAULT_NUM_CTX;
+//   }
+//   const n = Number.parseInt(String(raw), 10);
+//   if (!Number.isFinite(n) || n < 256) {
+//     return DEFAULT_NUM_CTX;
+//   }
+//   return Math.min(n, 262144);
+// }
 
 function buildPrompt(inputText) {
   return [
@@ -117,9 +112,8 @@ async function runOllamaExtraction({ model, input }) {
       model,
       prompt: buildPrompt(input),
       stream: false,
-      options: {
-        num_ctx: resolveNumCtx(),
-      },
+      // Let Ollama use server / Modelfile defaults (omit num_ctx for benchmarking).
+      // options: { num_ctx: resolveNumCtx() },
     }),
   });
 

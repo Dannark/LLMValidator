@@ -41,6 +41,23 @@ function formatDurationMs(ms) {
   return `${seconds}s`;
 }
 
+/** Per-request latency in tables: ms when fast, else seconds or minutes + seconds. */
+function formatLatencyDisplay(ms) {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) {
+    return '—';
+  }
+  if (ms < 1000) {
+    return `${Math.round(ms)} ms`;
+  }
+  const totalSec = ms / 1000;
+  if (totalSec < 60) {
+    return `${totalSec.toFixed(1)} s`;
+  }
+  const minutes = Math.floor(totalSec / 60);
+  const seconds = totalSec - minutes * 60;
+  return `${minutes}m ${seconds.toFixed(1)}s`;
+}
+
 function formatElapsedTime(ms) {
   return formatDurationMs(ms);
 }
@@ -1026,7 +1043,7 @@ function App() {
               ) : null}
               <p>Valid JSON: {summary.json_valid_count}</p>
               <p>Valid JSON rate: {(summary.json_valid_rate * 100).toFixed(2)}%</p>
-              <p>Average latency: {summary.avg_latency_ms} ms</p>
+              <p>Average latency: {formatLatencyDisplay(summary.avg_latency_ms)}</p>
               <p>Total elapsed time: {formatElapsedTime(summary.total_elapsed_ms)}</p>
               {runStatus === 'canceled' ? (
                 <p className="meta-row">Run ended with cancellation; partial rows are kept above.</p>
@@ -1051,7 +1068,7 @@ function App() {
                     <th>#</th>
                     <th>Input</th>
                     <th>Valid JSON</th>
-                    <th>Latency (ms)</th>
+                    <th>Latency</th>
                     <th>Raw output</th>
                   </tr>
                 </thead>
@@ -1066,7 +1083,9 @@ function App() {
                       <td>{index + 1}</td>
                       <td>{row.input}</td>
                       <td>{row.pending ? '—' : row.json_valid ? 'Yes' : 'No'}</td>
-                      <td>{row.pending ? '—' : row.execution_time_ms}</td>
+                      <td>
+                        {row.pending ? '—' : formatLatencyDisplay(row.execution_time_ms)}
+                      </td>
                       <td>
                         {row.pending ? '…' : row.raw_output || row.error || '-'}
                       </td>
