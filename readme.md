@@ -37,3 +37,9 @@ sudo systemctl edit ollama
 sudo systemctl daemon-reload
 sudo systemctl restart ollama
 systemctl show ollama --property=Environment
+
+
+
+sudo dnf install -y tmux
+tmux new -s llm
+cd ~/LLMValidator && npm run dev:ec2

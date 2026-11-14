@@ -19,28 +19,15 @@ const OLLAMA_TAGS_URL = `${OLLAMA_BASE}/api/tags`;
 //   return Math.min(n, 262144);
 // }
 
+/** Instructions for the model role and normalization rules (Ollama `system` field). */
+const OLLAMA_SYSTEM_PROMPT =
+  'You are an address normalization service. Extract and return a structured JSON with: person name or company (call it as name), address1 (including number), address2, city, region, postal_code, country. Consider details like unit, apartment, postal box and similar as address2. Return everything uppercase. Region/state should have its full name, if possible. Keep country with 3 letters. If the zip code is set, use it to help on detect the country. Try to do not keep the country empty. But, if you are not able to extract the data, keep it blank.';
+
+/** User turn: schema alignment for this app + raw input (minimal). */
 function buildPrompt(inputText) {
   return [
-    "You're a name and address parser. You should extract it from a string that has name and address together.",
-    'Extract the address fields from the input text and return ONLY valid JSON.',
-    'Do not include markdown, explanations, or extra keys.',
-    'Required keys: name, address1, address2, city, region, postal, country.',
-    'Use empty string when a field is unknown.',
-    'Name rules:',
-    '- The name field acts as an identifier / primary key (e.g. "Company X, person name").',
-    '- Copy the name from the input EXACTLY as given: same wording, punctuation, commas, and order. Do not rephrase, normalize, fix spelling, or merge with address lines.',
-    'Region and country rules:',
-    '- Never abbreviate region or country. Use full region names (e.g. full state or province name, not a 2-letter code) and full English country names.',
-    '- If the input explicitly mentions a country (e.g. "UNITED STATES", "CANADA", "BRAZIL", "ISRAEL"), use that country in full form.',
-    '- Do NOT output 2-letter country codes (e.g. "US", "BR").',
-    '- If the input does NOT explicitly mention a country, leave country as an empty string.',
-    'Address rules:',
-    '- Put the main street/number (and PO Box) in address1.',
-    '- Put unit/suite/apartment/building/floor and other complements in address2.',
-    '- Put ONLY the customer/entity name in name. Do NOT duplicate address text inside name.',
-    '- If uncertain, preserve tokens from input instead of inventing or normalizing.',
-    '- Do NOT drop meaningful address fragments; keep overflow/complements in address2.',
-    'Output format:',
+    'Return ONLY valid JSON. No markdown, no prose.',
+    'Use exactly these keys (postal is the zip/postal code):',
     '{"name":"","address1":"","address2":"","city":"","region":"","postal":"","country":""}',
     '',
     `Input: ${inputText}`,
@@ -110,6 +97,7 @@ async function runOllamaExtraction({ model, input }) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       model,
+      system: OLLAMA_SYSTEM_PROMPT,
       prompt: buildPrompt(input),
       stream: false,
       // Let Ollama use server / Modelfile defaults (omit num_ctx for benchmarking).

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   cancelRunnerBenchmark,
   deleteDatasetByFileName,
@@ -18,6 +18,8 @@ const STAGES = ['Dataset', 'Runner', 'Evaluator', 'Review & Report'];
 const PAGE_SIZE = 12;
 const PREFERRED_MODEL = 'gemma3:4b';
 const RUNNER_TABLE_PREVIEW = 100;
+/** Stable empty reference for derived runner/evaluator result lists. */
+const EMPTY_RUNNER_RESULTS = [];
 const EXPECTED_FIELDS = ['street', 'city', 'state', 'postal_code', 'country'];
 const DATASET_LOCALE_OPTIONS = [
   { value: 'mixed', label: 'Mixed (US + BR + DE)' },
@@ -153,6 +155,41 @@ const GROUND_TRUTH_COLUMNS = [
   'zip',
 ];
 
+/** Dropdown options for “Export output vs expected CSV” match column. */
+const EXPORT_COMPARISON_METRICS = [
+  {
+    id: 'custom',
+    label: 'Evaluator rules (default)',
+    shortHint:
+      'Same logic as the Evaluator tab: tolerant zip/country, case-insensitive text fields.',
+  },
+  {
+    id: 'exact_fields',
+    label: 'Exactly field by field (ignore case)',
+    shortHint: 'Trim + lowercase on every field; no country aliases; empty expected zip must match empty output zip.',
+  },
+  {
+    id: 'address1_only',
+    label: 'Only address1',
+    shortHint: 'Compares only the first address line (street / address1), ignore case.',
+  },
+  {
+    id: 'address1_address2',
+    label: 'Only address1 and address2',
+    shortHint: 'Compares address1 and address2 only, ignore case.',
+  },
+];
+
+const EXPORT_COMPARISON_CUSTOM_RULES_HTML = (
+  <p className="meta-row" style={{ marginTop: '6px', marginBottom: 0 }}>
+    <strong>Evaluator rules</strong> — same as auto-match on the Evaluator: all seven fields must agree
+    after <strong>trim + lowercase</strong>. Extra rules: <strong>country</strong> treats USA / US /
+    United States / … as the same; if <strong>expected country is empty</strong>, any model country
+    counts as match. <strong>Zip</strong>: if the expected zip is empty, any model postal code counts
+    as match; if expected has a zip, it must match the model value (ignore case).
+  </p>
+);
+
 /** True when dataset items include embedded expected columns (new CSV format), even without metadata.embedded_expected. */
 function datasetHasEmbeddedGroundTruth(dataset) {
   if (!Array.isArray(dataset) || dataset.length === 0) {
@@ -208,6 +245,11 @@ function fieldValuesMatchGroundTruth(fieldKey, expectedVal, parsedVal) {
   return normalizeValue(expectedVal) === normalizeValue(parsedVal);
 }
 
+/** Embedded upload / separate GT file: { name, address1, … zip }. Generated sets use { street, … postal_code }. */
+function expectedUsesGroundTruthEvaluatorShape(expected) {
+  return Boolean(expected && typeof expected === 'object' && 'address1' in expected);
+}
+
 function isGroundTruthRowMatch(expected, parsed) {
   if (!parsed || typeof parsed !== 'object') {
     return false;
@@ -224,6 +266,229 @@ function isGroundTruthRowMatch(expected, parsed) {
   return pairs.every(([expKey, parsedKey]) =>
     fieldValuesMatchGroundTruth(expKey, expected[expKey], parsed[parsedKey]),
   );
+}
+
+/**
+ * Per-field Match cell for Evaluator table. `null` → show "—" (field not used by this metric).
+ */
+function fieldMatchCellForMetric(field, expectedValue, outputValue, metricId, useGroundTruthColumns) {
+  if (metricId === 'custom') {
+    if (useGroundTruthColumns) {
+      return fieldValuesMatchGroundTruth(field, expectedValue, outputValue);
+    }
+    return normalizeValue(expectedValue) === normalizeValue(outputValue);
+  }
+  if (metricId === 'exact_fields') {
+    return normalizeValue(expectedValue) === normalizeValue(outputValue);
+  }
+  if (metricId === 'address1_only') {
+    if (useGroundTruthColumns && field === 'address1') {
+      return normalizeValue(expectedValue) === normalizeValue(outputValue);
+    }
+    if (!useGroundTruthColumns && field === 'street') {
+      return normalizeValue(expectedValue) === normalizeValue(outputValue);
+    }
+    return null;
+  }
+  if (metricId === 'address1_address2') {
+    if (useGroundTruthColumns && (field === 'address1' || field === 'address2')) {
+      return normalizeValue(expectedValue) === normalizeValue(outputValue);
+    }
+    if (!useGroundTruthColumns && field === 'street') {
+      return normalizeValue(expectedValue) === normalizeValue(outputValue);
+    }
+    return null;
+  }
+  if (useGroundTruthColumns) {
+    return fieldValuesMatchGroundTruth(field, expectedValue, outputValue);
+  }
+  return normalizeValue(expectedValue) === normalizeValue(outputValue);
+}
+
+/** Strict GT match: every field equals after trim+lower only (no zip/country shortcuts). */
+function isGroundTruthRowExactNormalizedOnly(expected, parsed) {
+  if (!parsed || typeof parsed !== 'object' || !expected) {
+    return false;
+  }
+  const pairs = [
+    ['name', 'name'],
+    ['address1', 'address1'],
+    ['address2', 'address2'],
+    ['city', 'city'],
+    ['region', 'region'],
+    ['country', 'country'],
+    ['zip', 'postal'],
+  ];
+  return pairs.every(([ek, pk]) => normalizeValue(expected[ek]) === normalizeValue(parsed[pk]));
+}
+
+function parsedModelAddress12(parsed) {
+  const p = parsed && typeof parsed === 'object' ? parsed : {};
+  return {
+    a1: `${p.address1 ?? p.street ?? ''}`.trim(),
+    a2: `${p.address2 ?? ''}`.trim(),
+  };
+}
+
+function expectedAddress12(expected) {
+  if (!expected || typeof expected !== 'object') {
+    return { a1: '', a2: '' };
+  }
+  if (expectedUsesGroundTruthEvaluatorShape(expected)) {
+    return {
+      a1: `${expected.address1 ?? ''}`.trim(),
+      a2: `${expected.address2 ?? ''}`.trim(),
+    };
+  }
+  return {
+    a1: `${expected.street ?? ''}`.trim(),
+    a2: '',
+  };
+}
+
+function rowExactFieldsMatchForExport(row) {
+  if (!row?.json_valid || !row.parsed_json || typeof row.parsed_json !== 'object') {
+    return false;
+  }
+  const expected = row.expected;
+  if (!expected || typeof expected !== 'object') {
+    return false;
+  }
+  if (expectedUsesGroundTruthEvaluatorShape(expected)) {
+    return isGroundTruthRowExactNormalizedOnly(expected, row.parsed_json);
+  }
+  return isExactRowMatch(expected, row.parsed_json);
+}
+
+function rowAddress1OnlyMatchForExport(row) {
+  if (!row?.json_valid || !row.parsed_json || typeof row.parsed_json !== 'object') {
+    return false;
+  }
+  const expected = row.expected;
+  if (!expected || typeof expected !== 'object') {
+    return false;
+  }
+  const { a1: p1 } = parsedModelAddress12(row.parsed_json);
+  const { a1: e1 } = expectedAddress12(expected);
+  return normalizeValue(e1) === normalizeValue(p1);
+}
+
+function rowAddress1Address2MatchForExport(row) {
+  if (!row?.json_valid || !row.parsed_json || typeof row.parsed_json !== 'object') {
+    return false;
+  }
+  const expected = row.expected;
+  if (!expected || typeof expected !== 'object') {
+    return false;
+  }
+  const { a1: p1, a2: p2 } = parsedModelAddress12(row.parsed_json);
+  const { a1: e1, a2: e2 } = expectedAddress12(expected);
+  return normalizeValue(e1) === normalizeValue(p1) && normalizeValue(e2) === normalizeValue(p2);
+}
+
+function runnerRowMatchForExportByMetric(row, metricId) {
+  switch (metricId) {
+    case 'exact_fields':
+      return rowExactFieldsMatchForExport(row);
+    case 'address1_only':
+      return rowAddress1OnlyMatchForExport(row);
+    case 'address1_address2':
+      return rowAddress1Address2MatchForExport(row);
+    case 'custom':
+    default:
+      return runnerRowMatchForExport(row);
+  }
+}
+
+/** Semicolon-separated comparison CSV: model left, expected right, match last (0/1 by metric). */
+function buildComparisonCsvDelimitedText(results, metricId) {
+  if (!Array.isArray(results) || results.length === 0) {
+    return '';
+  }
+  const delim = ';';
+  const sepMarker = '<—>';
+  const leftHeader = ['name', 'address1', 'address2', 'city', 'region', 'country', 'postal'];
+  const rightHeader = ['Name', 'Address1', 'Address2', 'City', 'Region', 'Country', 'Zip'];
+  const headerCells = [
+    ...leftHeader,
+    sepMarker,
+    '',
+    '',
+    ...rightHeader,
+    'match',
+  ].map(csvEscape);
+  const lines = [headerCells.join(delim)];
+
+  for (const row of results) {
+    const parsed = row.parsed_json || {};
+    const expected = row.expected || {};
+    const match = runnerRowMatchForExportByMetric(row, metricId) ? '1' : '0';
+    const leftVals = [
+      parsed.name || '',
+      parsed.address1 || parsed.street || '',
+      parsed.address2 || '',
+      parsed.city || '',
+      parsed.region || parsed.state || '',
+      parsed.country || '',
+      parsed.postal || parsed.postal_code || '',
+    ];
+    const rightVals = expectedCellsSevenForExport(expected);
+    const line = [...leftVals, sepMarker, '', '', ...rightVals, match].map(csvEscape);
+    lines.push(line.join(delim));
+  }
+  return lines.join('\n');
+}
+
+function downloadTextFile(filename, text, mime = 'text/csv;charset=utf-8') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
+
+/** Same rules as Evaluator auto-match (ground-truth shape vs generated street/city…). */
+function runnerRowMatchForExport(row) {
+  if (!row?.json_valid || !row.parsed_json || typeof row.parsed_json !== 'object') {
+    return false;
+  }
+  const expected = row.expected;
+  if (!expected || typeof expected !== 'object') {
+    return false;
+  }
+  if (expectedUsesGroundTruthEvaluatorShape(expected)) {
+    return isGroundTruthRowMatch(expected, row.parsed_json);
+  }
+  return isExactRowMatch(expected, row.parsed_json);
+}
+
+/** Seven cells for the “expected” block in comparison CSV (upload vs generated schema). */
+function expectedCellsSevenForExport(expected) {
+  if (!expected || typeof expected !== 'object') {
+    return ['', '', '', '', '', '', ''];
+  }
+  if (expectedUsesGroundTruthEvaluatorShape(expected)) {
+    return [
+      `${expected.name ?? ''}`.trim(),
+      `${expected.address1 ?? ''}`.trim(),
+      `${expected.address2 ?? ''}`.trim(),
+      `${expected.city ?? ''}`.trim(),
+      `${expected.region ?? ''}`.trim(),
+      `${expected.country ?? ''}`.trim(),
+      `${expected.zip ?? ''}`.trim(),
+    ];
+  }
+  return [
+    '',
+    `${expected.street ?? ''}`.trim(),
+    '',
+    `${expected.city ?? ''}`.trim(),
+    `${expected.state ?? ''}`.trim(),
+    `${expected.country ?? ''}`.trim(),
+    `${expected.postal_code ?? ''}`.trim(),
+  ];
 }
 
 function parseCsvLine(line, delimiter) {
@@ -329,15 +594,102 @@ function parseGroundTruthCsv(text) {
   return { rows, error: null };
 }
 
-function buildEvaluationRows(results = [], groundTruthRows = null) {
+/** Same shape as "Export LLM output CSV" from Runner (optional address2). */
+const RUNNER_OUTPUT_CSV_ALIASES = {
+  name: ['name', 'customer_name', 'full_name'],
+  address1: ['address1', 'address_1', 'addr1', 'street', 'line1'],
+  address2: ['address2', 'address_2', 'addr2', 'line2'],
+  city: ['city'],
+  region: ['region', 'state', 'province'],
+  country: ['country'],
+  postal: ['postal', 'postal_code', 'zip', 'zipcode', 'postcode'],
+};
+
+function mapRunnerOutputCsvHeader(headerCells) {
+  const colIndex = {};
+  const normalized = headerCells.map(normalizeCsvHeader);
+  for (const [canonical, aliases] of Object.entries(RUNNER_OUTPUT_CSV_ALIASES)) {
+    const idx = normalized.findIndex((h) => aliases.includes(h));
+    if (idx >= 0) {
+      colIndex[canonical] = idx;
+    }
+  }
+  const required = ['name', 'address1', 'city', 'region', 'country', 'postal'];
+  const missing = required.filter((k) => colIndex[k] === undefined);
+  if (missing.length > 0) {
+    return {
+      colIndex: null,
+      error: `Missing column(s): ${missing.join(', ')}. Found headers: ${headerCells.join(', ')}`,
+    };
+  }
+  if (colIndex.address2 === undefined) {
+    colIndex.address2 = -1;
+  }
+  return { colIndex, error: null };
+}
+
+function parseRunnerOutputCsv(text) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((l) => l.trimEnd())
+    .filter((l) => l.trim().length > 0);
+  if (lines.length < 2) {
+    return { parsedRows: [], error: 'CSV must include a header row and at least one data row.' };
+  }
+  const delim = detectCsvDelimiter(lines[0]);
+  const headerCells = parseCsvLine(lines[0], delim);
+  const { colIndex, error: headerError } = mapRunnerOutputCsvHeader(headerCells);
+  if (headerError || !colIndex) {
+    return { parsedRows: [], error: headerError || 'Invalid CSV header.' };
+  }
+  const parsedRows = [];
+  for (let li = 1; li < lines.length; li += 1) {
+    const cells = parseCsvLine(lines[li], delim);
+    const pick = (key) => {
+      const idx = colIndex[key];
+      if (idx === undefined || idx < 0) {
+        return '';
+      }
+      return cells[idx] != null ? `${cells[idx]}`.trim() : '';
+    };
+    parsedRows.push({
+      name: pick('name'),
+      address1: pick('address1'),
+      address2: pick('address2'),
+      city: pick('city'),
+      region: pick('region'),
+      country: pick('country'),
+      postal: pick('postal'),
+    });
+  }
+  return { parsedRows, error: null };
+}
+
+function buildRunnerRowsFromImportedOutputs(datasetItems, parsedOutputs) {
+  return datasetItems.map((item, index) => ({
+    input: item.input ?? '',
+    expected: item.expected ?? null,
+    source_original: item.source_original ?? null,
+    raw_output: '',
+    parsed_json: parsedOutputs[index] ?? null,
+    json_valid: true,
+    execution_time_ms: 0,
+    error: null,
+    pending: false,
+  }));
+}
+
+function buildEvaluationRows(results = [], groundTruthRows = null, matchMetricId = 'custom') {
   return results.map((row, index) => {
     const expected =
       groundTruthRows != null ? groundTruthRows[index] || {} : row.expected || {};
+    const runnerLike = {
+      json_valid: row.json_valid,
+      parsed_json: row.parsed_json,
+      expected,
+    };
     const exactMatch =
-      row.json_valid &&
-      (groundTruthRows != null
-        ? isGroundTruthRowMatch(expected, row.parsed_json)
-        : isExactRowMatch(expected, row.parsed_json));
+      row.json_valid && runnerRowMatchForExportByMetric(runnerLike, matchMetricId);
     return {
       id: `${index}-${row.input}`,
       index: index + 1,
@@ -396,14 +748,42 @@ function App() {
   const [runnerElapsedTick, setRunnerElapsedTick] = useState(0);
   const [runnerShowFullTable, setRunnerShowFullTable] = useState(false);
   const [runnerHasCsv, setRunnerHasCsv] = useState(false);
+  const [exportComparisonMetric, setExportComparisonMetric] = useState('custom');
   const [evaluatorGroundTruthRows, setEvaluatorGroundTruthRows] = useState(null);
   const [evaluatorGroundTruthFileName, setEvaluatorGroundTruthFileName] = useState('');
   const [evaluatorGroundTruthError, setEvaluatorGroundTruthError] = useState('');
+  const [evaluatorImportedResults, setEvaluatorImportedResults] = useState(null);
+  const [evaluatorImportedResultsFileName, setEvaluatorImportedResultsFileName] = useState('');
+  const [evaluatorImportedResultsError, setEvaluatorImportedResultsError] = useState('');
   const [error, setError] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
   const groundTruthFileInputRef = useRef(null);
+  const evaluatorResultsCsvInputRef = useRef(null);
   const runnerMetricsPollRef = useRef(null);
   const runnerStartInFlightRef = useRef(false);
+
+  const runnerSessionHasTerminalResults =
+    (runnerResult?.results?.length ?? 0) > 0 &&
+    (runnerResult?.runStatus === 'completed' || runnerResult?.runStatus === 'canceled');
+
+  const resultsForEvaluation = useMemo(() => {
+    if (runnerSessionHasTerminalResults) {
+      return runnerResult?.results ?? EMPTY_RUNNER_RESULTS;
+    }
+    if (Array.isArray(evaluatorImportedResults)) {
+      return evaluatorImportedResults;
+    }
+    return EMPTY_RUNNER_RESULTS;
+  }, [runnerSessionHasTerminalResults, runnerResult?.results, evaluatorImportedResults]);
+
+  const clearEvaluatorImportedResults = useCallback(() => {
+    setEvaluatorImportedResults(null);
+    setEvaluatorImportedResultsFileName('');
+    setEvaluatorImportedResultsError('');
+    if (evaluatorResultsCsvInputRef.current) {
+      evaluatorResultsCsvInputRef.current.value = '';
+    }
+  }, []);
 
   useEffect(() => {
     if (!runnerLoading) {
@@ -557,23 +937,52 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const results = runnerResult?.results || [];
     const useSeparateGroundTruthFile =
       metadata?.source_type === 'uploaded_csv' &&
       Array.isArray(evaluatorGroundTruthRows) &&
       evaluatorGroundTruthRows.length > 0;
     const gt = useSeparateGroundTruthFile ? evaluatorGroundTruthRows : null;
-    setEvaluationRows(buildEvaluationRows(results, gt));
-    setEvaluationIndex(0);
-  }, [runnerResult, evaluatorGroundTruthRows, metadata?.source_type]);
+    setEvaluationRows((prev) => {
+      const built = buildEvaluationRows(resultsForEvaluation, gt, exportComparisonMetric);
+      return built.map((row) => {
+        const prevRow = prev.find((p) => p.id === row.id);
+        return {
+          ...row,
+          manual_decision: prevRow?.manual_decision ?? null,
+        };
+      });
+    });
+    setEvaluationIndex((i) => {
+      const n = resultsForEvaluation.length;
+      if (n <= 0) {
+        return 0;
+      }
+      return Math.min(Math.max(0, i), n - 1);
+    });
+  }, [
+    resultsForEvaluation,
+    evaluatorGroundTruthRows,
+    metadata?.source_type,
+    exportComparisonMetric,
+  ]);
+
+  useEffect(() => {
+    if (
+      runnerResult?.runStatus === 'completed' &&
+      (runnerResult?.results?.length ?? 0) > 0
+    ) {
+      clearEvaluatorImportedResults();
+    }
+  }, [runnerResult?.runStatus, runnerResult?.results?.length, clearEvaluatorImportedResults]);
 
   useEffect(() => {
     if (metadata?.source_type !== 'uploaded_csv') {
       setEvaluatorGroundTruthRows(null);
       setEvaluatorGroundTruthFileName('');
       setEvaluatorGroundTruthError('');
+      clearEvaluatorImportedResults();
     }
-  }, [metadata?.source_type]);
+  }, [metadata?.source_type, clearEvaluatorImportedResults]);
 
   useEffect(() => {
     async function loadModels() {
@@ -618,6 +1027,7 @@ function App() {
       const historyResponse = await getDatasetHistory();
       setHistory(historyResponse.items || []);
       setSuccessMessage('Dataset generated successfully.');
+      clearEvaluatorImportedResults();
     } catch (err) {
       setError(err.message || 'Failed to generate dataset.');
     } finally {
@@ -642,6 +1052,7 @@ function App() {
       const historyResponse = await getDatasetHistory();
       setHistory(historyResponse.items || []);
       setSuccessMessage('CSV uploaded and normalized successfully.');
+      clearEvaluatorImportedResults();
     } catch (err) {
       setError(err.message || 'Failed to upload CSV.');
     } finally {
@@ -660,6 +1071,7 @@ function App() {
       setMetadata(response.metadata || null);
       setPage(1);
       setSuccessMessage(`Dataset ${fileName} loaded successfully.`);
+      clearEvaluatorImportedResults();
     } catch (err) {
       setError(err.message || 'Failed to load dataset.');
     } finally {
@@ -704,6 +1116,7 @@ function App() {
 
       setPage(1);
       setSuccessMessage(`Dataset ${fileName} deleted successfully.`);
+      clearEvaluatorImportedResults();
     } catch (err) {
       setError(err.message || 'Failed to delete dataset.');
     } finally {
@@ -800,6 +1213,47 @@ function App() {
     }
   }
 
+  function handleEvaluatorResultsCsvChange(event) {
+    const file = event.target.files?.[0];
+    if (!file) {
+      return;
+    }
+    if (metadata?.source_type !== 'uploaded_csv' || dataset.length === 0) {
+      setEvaluatorImportedResults(null);
+      setEvaluatorImportedResultsFileName('');
+      setEvaluatorImportedResultsError('Load an uploaded CSV dataset on the Dataset tab first.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = typeof reader.result === 'string' ? reader.result : '';
+      const { parsedRows, error: parseError } = parseRunnerOutputCsv(text);
+      if (parseError) {
+        setEvaluatorImportedResults(null);
+        setEvaluatorImportedResultsFileName('');
+        setEvaluatorImportedResultsError(parseError);
+        return;
+      }
+      if (parsedRows.length !== dataset.length) {
+        setEvaluatorImportedResults(null);
+        setEvaluatorImportedResultsFileName('');
+        setEvaluatorImportedResultsError(
+          `Result CSV has ${parsedRows.length} data row(s) but the loaded dataset has ${dataset.length}. Row order must match the Dataset (or use an export from a full run on the same CSV).`,
+        );
+        return;
+      }
+      setEvaluatorImportedResults(buildRunnerRowsFromImportedOutputs(dataset, parsedRows));
+      setEvaluatorImportedResultsFileName(file.name);
+      setEvaluatorImportedResultsError('');
+    };
+    reader.onerror = () => {
+      setEvaluatorImportedResults(null);
+      setEvaluatorImportedResultsFileName('');
+      setEvaluatorImportedResultsError('Failed to read file.');
+    };
+    reader.readAsText(file, 'UTF-8');
+  }
+
   function handleExportRunnerCsv() {
     if (!runnerResult?.results?.length) {
       return;
@@ -831,6 +1285,28 @@ function App() {
     link.download = 'llm_output_normalized.csv';
     link.click();
     URL.revokeObjectURL(url);
+  }
+
+  function handleExportRunnerComparisonCsv() {
+    if (!runnerResult?.results?.length) {
+      return;
+    }
+    const text = buildComparisonCsvDelimitedText(runnerResult.results, exportComparisonMetric);
+    if (!text) {
+      return;
+    }
+    downloadTextFile('llm_output_vs_expected.csv', text);
+  }
+
+  function handleExportEvaluationComparisonCsv() {
+    if (!resultsForEvaluation.length) {
+      return;
+    }
+    const text = buildComparisonCsvDelimitedText(resultsForEvaluation, exportComparisonMetric);
+    if (!text) {
+      return;
+    }
+    downloadTextFile('llm_output_vs_expected.csv', text);
   }
 
   async function handleRefreshModels() {
@@ -925,6 +1401,42 @@ function App() {
               <button type="button" className="secondary" onClick={handleExportRunnerCsv}>
                 Export LLM output CSV
               </button>
+            ) : null}
+            {runnerResult?.results?.length ? (
+              <div
+                className="controls-row"
+                style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: '10px' }}
+              >
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', minWidth: 'min(100%, 22rem)' }}>
+                  <label htmlFor="export-comparison-metric">Match metric (comparison CSV)</label>
+                  <p className="meta-row" style={{ margin: 0, fontSize: '0.85rem', opacity: 0.9 }}>
+                    Same selection updates the Evaluator summary and per-row flags.
+                  </p>
+                  <select
+                    id="export-comparison-metric"
+                    value={exportComparisonMetric}
+                    onChange={(event) => setExportComparisonMetric(event.target.value)}
+                  >
+                    {EXPORT_COMPARISON_METRICS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                  {exportComparisonMetric === 'custom' ? (
+                    <div className="runner-summary" style={{ maxWidth: '48rem', marginTop: 0 }}>
+                      {EXPORT_COMPARISON_CUSTOM_RULES_HTML}
+                    </div>
+                  ) : (
+                    <p className="meta-row" style={{ margin: 0, maxWidth: '48rem', opacity: 0.92 }}>
+                      {EXPORT_COMPARISON_METRICS.find((m) => m.id === exportComparisonMetric)?.shortHint}
+                    </p>
+                  )}
+                </div>
+                <button type="button" className="secondary" onClick={handleExportRunnerComparisonCsv}>
+                  Export output vs expected CSV
+                </button>
+              </div>
             ) : null}
             {runnerLoading ? (
               <button
@@ -1117,9 +1629,9 @@ function App() {
 
     if (activeStage === 2) {
       const isUploadSource = metadata?.source_type === 'uploaded_csv';
-      const hasRunnerResults =
-        (runnerResult?.results?.length ?? 0) > 0 &&
-        (runnerResult?.runStatus === 'completed' || runnerResult?.runStatus === 'canceled');
+      const hasImportedEvaluationRows =
+        Array.isArray(evaluatorImportedResults) && evaluatorImportedResults.length > 0;
+      const hasRunnerResults = runnerSessionHasTerminalResults || hasImportedEvaluationRows;
       const embeddedFromDataset =
         isUploadSource &&
         (metadata?.embedded_expected === true || datasetHasEmbeddedGroundTruth(dataset));
@@ -1185,7 +1697,29 @@ function App() {
             {evaluatorGroundTruthError ? (
               <p className="error-message">{evaluatorGroundTruthError}</p>
             ) : null}
-            <p>Run the benchmark on the Runner tab first; evaluation needs model output.</p>
+            <p className="meta-row" style={{ marginTop: '12px' }}>
+              <strong>Without running the Runner again:</strong> load a previous{' '}
+              <strong>model output CSV</strong> — same format as Runner → &quot;Export LLM output
+              CSV&quot; (headers such as{' '}
+              <code>name, address1, address2, city, region, country, postal</code>). One data row per
+              row in the Dataset, same order.
+            </p>
+            <div className="controls-row">
+              <label htmlFor="evaluator-results-csv">Results CSV</label>
+              <input
+                id="evaluator-results-csv"
+                type="file"
+                accept=".csv,text/csv"
+                onChange={handleEvaluatorResultsCsvChange}
+              />
+            </div>
+            {evaluatorImportedResultsError ? (
+              <p className="error-message">{evaluatorImportedResultsError}</p>
+            ) : null}
+            <p className="meta-row">
+              Or run the benchmark on the Runner tab; when it finishes, results appear here
+              automatically.
+            </p>
           </section>
         );
       }
@@ -1197,10 +1731,17 @@ function App() {
       const pendingReviewCount = evaluationRows.filter(
         (row) => row.needs_manual_review && row.manual_decision === null,
       ).length;
-      const manualApprovedCount = evaluationRows.filter((row) => row.manual_decision === true).length;
-      const finalApprovedCount = autoApprovedCount + manualApprovedCount;
+      const manualOnlyApprovedCount = evaluationRows.filter(
+        (row) => row.manual_decision === true && !row.auto_exact_match,
+      ).length;
+      const finalApprovedCount = evaluationRows.filter(
+        (row) => row.auto_exact_match === true || row.manual_decision === true,
+      ).length;
       const finalRejectedCount = totalRows - finalApprovedCount;
       const finalApprovalRate = totalRows ? ((finalApprovedCount / totalRows) * 100).toFixed(2) : '0.00';
+      const activeMetricLabel =
+        EXPORT_COMPARISON_METRICS.find((m) => m.id === exportComparisonMetric)?.label ??
+        exportComparisonMetric;
 
       const embeddedFromDatasetForGt =
         isUploadSource &&
@@ -1208,13 +1749,15 @@ function App() {
       const hasGroundTruthRows =
         embeddedFromDatasetForGt ||
         (Array.isArray(evaluatorGroundTruthRows) && evaluatorGroundTruthRows.length > 0);
+      const useGtColsForTable =
+        metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows;
       const gtRowCount =
         evaluatorGroundTruthRows?.length > 0
           ? evaluatorGroundTruthRows.length
           : embeddedFromDatasetForGt
             ? dataset.length
             : 0;
-      const runnerRowCount = runnerResult?.results?.length ?? 0;
+      const runnerRowCount = resultsForEvaluation.length;
       const groundTruthRowMismatch =
         metadata?.source_type === 'uploaded_csv' &&
         hasGroundTruthRows &&
@@ -1233,6 +1776,16 @@ function App() {
       return (
         <section className="dataset-card">
           <h2>Evaluator</h2>
+          {!runnerSessionHasTerminalResults &&
+          evaluatorImportedResultsFileName &&
+          resultsForEvaluation.length > 0 ? (
+            <p className="meta-row" style={{ marginBottom: '12px' }}>
+              Using imported results: <strong>{evaluatorImportedResultsFileName}</strong>.{' '}
+              <button type="button" className="secondary" onClick={clearEvaluatorImportedResults}>
+                Remove imported CSV
+              </button>
+            </p>
+          ) : null}
           {metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows ? (
             <div style={{ marginBottom: '12px' }}>
               {embeddedFromDatasetForGt && !evaluatorGroundTruthFileName ? (
@@ -1241,54 +1794,159 @@ function App() {
                   {dataset.length} rows).
                 </p>
               ) : null}
-              <div className="controls-row" style={{ flexWrap: 'wrap' }}>
-                <label htmlFor="ground-truth-csv-replace">
-                  {embeddedFromDatasetForGt
-                    ? 'Replace expected values with another CSV (optional)'
-                    : 'Replace ground truth CSV'}
-                </label>
-                <input
-                  id="ground-truth-csv-replace"
-                  ref={groundTruthFileInputRef}
-                  type="file"
-                  accept=".csv,text/csv"
-                  onChange={handleGroundTruthFileChange}
-                />
-                {evaluatorGroundTruthFileName ? (
-                  <>
-                    <span className="meta-row">
-                      {evaluatorGroundTruthFileName} ({evaluatorGroundTruthRows?.length ?? 0} rows)
-                    </span>
-                    <button type="button" className="secondary" onClick={handleClearGroundTruthFile}>
-                      Clear file
-                    </button>
-                  </>
-                ) : null}
+              {embeddedFromDatasetForGt && !evaluatorGroundTruthFileName ? (
+                <details style={{ marginBottom: '10px' }}>
+                  <summary style={{ cursor: 'pointer', fontWeight: 600 }}>
+                    Optional: replace expected columns from another CSV
+                  </summary>
+                  <p className="meta-row" style={{ marginTop: '8px' }}>
+                    Only if you want to override the embedded ground truth; row order must match the
+                    Dataset.
+                  </p>
+                  <div className="controls-row" style={{ flexWrap: 'wrap' }}>
+                    <label htmlFor="ground-truth-csv-replace">Expected / ground truth CSV</label>
+                    <input
+                      id="ground-truth-csv-replace"
+                      ref={groundTruthFileInputRef}
+                      type="file"
+                      accept=".csv,text/csv"
+                      onChange={handleGroundTruthFileChange}
+                    />
+                    {evaluatorGroundTruthFileName ? (
+                      <>
+                        <span className="meta-row">
+                          {evaluatorGroundTruthFileName} ({evaluatorGroundTruthRows?.length ?? 0} rows)
+                        </span>
+                        <button type="button" className="secondary" onClick={handleClearGroundTruthFile}>
+                          Clear file
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+                </details>
+              ) : (
+                <div className="controls-row" style={{ flexWrap: 'wrap', marginBottom: '10px' }}>
+                  <label htmlFor="ground-truth-csv-replace">
+                    {embeddedFromDatasetForGt
+                      ? 'Replace expected values with another CSV'
+                      : 'Replace ground truth CSV'}
+                  </label>
+                  <input
+                    id="ground-truth-csv-replace"
+                    ref={groundTruthFileInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={handleGroundTruthFileChange}
+                  />
+                  {evaluatorGroundTruthFileName ? (
+                    <>
+                      <span className="meta-row">
+                        {evaluatorGroundTruthFileName} ({evaluatorGroundTruthRows?.length ?? 0} rows)
+                      </span>
+                      <button type="button" className="secondary" onClick={handleClearGroundTruthFile}>
+                        Clear file
+                      </button>
+                    </>
+                  ) : null}
+                </div>
+              )}
+              {!runnerSessionHasTerminalResults && !hasImportedEvaluationRows ? (
+                <div className="controls-row" style={{ flexWrap: 'wrap' }}>
+                  <label htmlFor="evaluator-results-csv-main">Model output CSV (import)</label>
+                  <input
+                    id="evaluator-results-csv-main"
+                    ref={evaluatorResultsCsvInputRef}
+                    type="file"
+                    accept=".csv,text/csv"
+                    onChange={handleEvaluatorResultsCsvChange}
+                  />
+                </div>
+              ) : null}
+              {!runnerSessionHasTerminalResults && hasImportedEvaluationRows ? (
+                <p className="meta-row" style={{ marginTop: '4px' }}>
+                  To import a different model output file, click <strong>Remove imported CSV</strong> above;
+                  the file picker will show again below.
+                </p>
+              ) : null}
+            </div>
+          ) : null}
+          {totalRows > 0 ? (
+            <div className="runner-summary" style={{ marginBottom: '12px' }}>
+              <strong>Export comparison CSV</strong>
+              <p className="meta-row" style={{ marginTop: '6px' }}>
+                Model output columns on the left, expected on the right, <code>match</code> last (1 or 0)
+                using the selected metric — same layout as Runner. Changing the metric also refreshes
+                the summary counts and the per-row table below.
+              </p>
+              <div
+                className="controls-row"
+                style={{ flexWrap: 'wrap', alignItems: 'flex-start', gap: '10px', marginTop: '8px' }}
+              >
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: '6px',
+                    minWidth: 'min(100%, 22rem)',
+                  }}
+                >
+                  <label htmlFor="evaluator-export-metric">Match metric</label>
+                  <select
+                    id="evaluator-export-metric"
+                    value={exportComparisonMetric}
+                    onChange={(event) => setExportComparisonMetric(event.target.value)}
+                  >
+                    {EXPORT_COMPARISON_METRICS.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.label}
+                      </option>
+                    ))}
+                  </select>
+                  {exportComparisonMetric === 'custom' ? (
+                    <div className="runner-summary" style={{ maxWidth: '48rem', marginTop: 0 }}>
+                      {EXPORT_COMPARISON_CUSTOM_RULES_HTML}
+                    </div>
+                  ) : (
+                    <p className="meta-row" style={{ margin: 0, maxWidth: '48rem', opacity: 0.92 }}>
+                      {EXPORT_COMPARISON_METRICS.find((m) => m.id === exportComparisonMetric)?.shortHint}
+                    </p>
+                  )}
+                </div>
+                <button type="button" className="secondary" onClick={handleExportEvaluationComparisonCsv}>
+                  Export output vs expected CSV
+                </button>
               </div>
             </div>
           ) : null}
           {groundTruthRowMismatch ? (
             <p className="error-message">
-              Ground truth has {gtRowCount} data rows but Runner output has {runnerRowCount}. Expected
-              values are applied by row index; extra runner rows have empty expected fields until the
-              CSV row count matches.
+              Ground truth has {gtRowCount} data rows but the loaded result rows are {runnerRowCount}.
+              Expected values are applied by row index; counts should match.
             </p>
           ) : null}
           {evaluatorGroundTruthError ? (
             <p className="error-message">{evaluatorGroundTruthError}</p>
           ) : null}
+          {evaluatorImportedResultsError ? (
+            <p className="error-message">{evaluatorImportedResultsError}</p>
+          ) : null}
           <div className="meta-row">
             <span>Total rows: {totalRows}</span>
-            <span>Auto approved: {autoApprovedCount}</span>
+            <span>
+              Auto approved: {autoApprovedCount} <em>({activeMetricLabel})</em>
+            </span>
             <span>Failed (invalid JSON): {failedCount}</span>
             <span>Pending manual review: {pendingReviewCount}</span>
           </div>
 
           <div className="runner-summary">
-            <strong>Final metrics (auto + manual)</strong>
+            <strong>
+              Final metrics (auto + manual) — match metric: {activeMetricLabel}
+            </strong>
             <p>Approved rows: {finalApprovedCount}</p>
             <p>Rejected rows: {finalRejectedCount}</p>
             <p>Approval rate: {finalApprovalRate}%</p>
+            <p className="meta-row">Manual overrides (approved without auto-match): {manualOnlyApprovedCount}</p>
           </div>
 
           {currentRow ? (
@@ -1299,7 +1957,8 @@ function App() {
                 </span>
                 <span>JSON valid: {currentRow.json_valid ? 'Yes' : 'No'}</span>
                 <span>
-                  Auto exact match: {currentRow.auto_exact_match ? 'Yes (approved)' : 'No'}
+                  Auto match ({activeMetricLabel}):{' '}
+                  {currentRow.auto_exact_match ? 'Yes (approved)' : 'No'}
                 </span>
               </div>
 
@@ -1330,16 +1989,22 @@ function App() {
                             ? currentRow.parsed_json?.postal ?? ''
                             : currentRow.parsed_json?.[field] ?? ''
                           : getGeneratedParsedDisplay(field, currentRow.parsed_json);
-                      const match =
-                        metadata?.source_type === 'uploaded_csv' && hasGroundTruthRows
-                          ? fieldValuesMatchGroundTruth(field, expectedValue, outputValue)
-                          : normalizeValue(expectedValue) === normalizeValue(outputValue);
+                      const matchResult = fieldMatchCellForMetric(
+                        field,
+                        expectedValue,
+                        outputValue,
+                        exportComparisonMetric,
+                        useGtColsForTable,
+                      );
+                      const matchLabel =
+                        matchResult === null ? '—' : matchResult ? 'Yes' : 'No';
+                      const rowInvalid = matchResult !== null && !matchResult;
                       return (
-                        <tr key={field} className={match ? '' : 'row-json-invalid'}>
+                        <tr key={field} className={rowInvalid ? 'row-json-invalid' : ''}>
                           <td>{field}</td>
                           <td>{expectedValue || '-'}</td>
                           <td>{outputValue || '-'}</td>
-                          <td>{match ? 'Yes' : 'No'}</td>
+                          <td>{matchLabel}</td>
                         </tr>
                       );
                     })}
